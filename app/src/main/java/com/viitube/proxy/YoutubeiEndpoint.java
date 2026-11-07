@@ -50,6 +50,10 @@ public class YoutubeiEndpoint implements Endpoint {
         // Always read the body: NanoHTTPD would take unread bytes for the next request on a
         // kept-alive connection.
         byte[] body = readBody(session);
+        String auth = session.getHeaders().get("authorization");
+        android.util.Log.i(TAG, "req " + mode + " " + session.getUri()
+                + (auth == null ? " (no auth)" : auth.toLowerCase(java.util.Locale.US).startsWith("bearer")
+                        ? " (Bearer len " + auth.length() + ")" : " (" + auth.split(" ")[0] + ")"));
         if ("config".equals(mode)) return config(session);
         if ("device_204".equals(mode)) {
             return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.NO_CONTENT, "text/plain", "");

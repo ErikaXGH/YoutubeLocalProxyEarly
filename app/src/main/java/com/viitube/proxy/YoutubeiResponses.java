@@ -570,7 +570,13 @@ final class YoutubeiResponses {
     /** FEaccount. Signing in is not supported. */
     static byte[] account() {
         List<VideoListProto.AccountTabLink> links = new java.util.ArrayList<VideoListProto.AccountTabLink>();
-        links.add(browseLink("Signing in is not available", ICON_TAB_ACCOUNT, null));
+        if (YouTubeAuth.signedIn()) {
+            String name = YouTubeAuth.accountName();
+            links.add(browseLink(name.isEmpty() ? "Signed in" : name, ICON_TAB_ACCOUNT, null));
+            links.add(browseLink("Subscriptions", ICON_PIVOT_SUBSCRIPTIONS, "FEsubscriptions"));
+        } else {
+            links.add(browseLink("Signing in is not available", ICON_TAB_ACCOUNT, null));
+        }
         links.add(browseLink("Popular on YouTube", ICON_TAB_TRENDING, "FEtrending"));
         links.add(browseLink("Music", ICON_MIX, "FEmusic"));
         return linkPage("FEaccount", "Account", links);
