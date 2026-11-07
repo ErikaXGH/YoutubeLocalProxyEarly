@@ -1520,8 +1520,11 @@ public class InnertubeEndpoint implements Endpoint {
                 futures.add(completion.submit(new MetadataTask(video, config, context)));
                 submitted++;
             }
-            if (fetchFullMetadata) {
-                futures.add(completion.submit(new LikesTask(video, context, config.getBool("ryd_enabled", false))));
+            boolean ryd = config.getBool("ryd_enabled", false);
+            if (fetchFullMetadata || ryd) {
+                // With a Data API key the likes are YouTube's own; Return YouTube Dislike then
+                // only adds the dislikes.
+                futures.add(completion.submit(new LikesTask(video, context, ryd, fetchFullMetadata)));
                 submitted++;
             }
         }
@@ -1664,16 +1667,23 @@ public class InnertubeEndpoint implements Endpoint {
         private final Video video;
         private final Context context;
         private final boolean ryd;
+        private final boolean likes;
 
         LikesTask(Video video, Context context, boolean ryd) {
+            this(video, context, ryd, true);
+        }
+
+        /** {@code likes} false: only the dislikes are wanted (the likes came from the Data API). */
+        LikesTask(Video video, Context context, boolean ryd, boolean likes) {
             this.video = video;
             this.context = context;
             this.ryd = ryd;
+            this.likes = likes;
         }
 
         @Override
         public Runnable call() throws Exception {
-            return new ApplyLikes(video, fetchRydLikes(video.id, context), ryd);
+            return new ApplyLikes(video, fetchRydLikes(video.id, context), ryd, likes);
         }
     }
 
@@ -1681,18 +1691,20 @@ public class InnertubeEndpoint implements Endpoint {
         private final Video video;
         private final String counts;
         private final boolean ryd;
+        private final boolean likes;
 
-        ApplyLikes(Video video, String counts, boolean ryd) {
+        ApplyLikes(Video video, String counts, boolean ryd, boolean likes) {
             this.video = video;
             this.counts = counts;
             this.ryd = ryd;
+            this.likes = likes;
         }
 
         @Override
         public void run() {
             if (counts.isEmpty()) return;
             String[] parts = counts.split("\t", -1);
-            if (!parts[0].isEmpty()) video.likes = parts[0];
+            if (likes && !parts[0].isEmpty()) video.likes = parts[0];
             // Dislikes only when the Return YouTube Dislike option is on; off means zero.
             if (ryd && parts.length > 1 && !parts[1].isEmpty()) video.dislikes = parts[1];
         }
@@ -1705,6 +1717,59 @@ public class InnertubeEndpoint implements Endpoint {
                     return size() > MemoryBudget.entries(512);
                 }
             });
+
+    /**
+     * gd:rating from likes and dislikes, the way the old site turned them into stars: a like is
+     * 5, a dislike 1. The apps of 2009-2012 draw the stars (or the like bar) from it.
+     */
+    static String gdRating(String likesText, String dislikesText) {
+        long likes = 0;
+        long dislikes = 0;
+        try { likes = Long.parseLong(numericCount(likesText)); } catch (NumberFormatException ignored) { }
+        try { dislikes = Long.parseLong(numericCount(dislikesText)); } catch (NumberFormatException ignored) { }
+        long raters = likes + dislikes;
+        double average = raters == 0 ? 5 : 1 + 4.0 * likes / raters;
+        return "<gd:rating average='" + String.format(Locale.US, "%.2f", average)
+                + "' max='5' min='1' numRaters='" + raters
+                + "' rel='http://schemas.google.com/g/2005#overall'/>";
+    }
+
+    /** The dislike counts of some videos from Return YouTube Dislike, read side by side. */
+    static java.util.Map<String, String> rydDislikes(List<String> videoIds, final Context context,
+                                                     long budgetMs) {
+        java.util.Map<String, String> result = new java.util.HashMap<String, String>();
+        java.util.Map<String, Future<String>> pending = new java.util.LinkedHashMap<String, Future<String>>();
+        for (final String id : videoIds) {
+            if (!isValidVideoId(id) || pending.containsKey(id)) continue;
+            pending.put(id, ENRICH_POOL.submit(new RydTask(id, context)));
+        }
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budgetMs);
+        for (java.util.Map.Entry<String, Future<String>> entry : pending.entrySet()) {
+            try {
+                long left = Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()));
+                String counts = entry.getValue().get(left, TimeUnit.MILLISECONDS);
+                String[] parts = counts.split("\t", -1);
+                if (parts.length > 1 && !parts[1].isEmpty()) result.put(entry.getKey(), parts[1]);
+            } catch (Exception ignored) {
+            }
+        }
+        return result;
+    }
+
+    private static final class RydTask implements Callable<String> {
+        private final String videoId;
+        private final Context context;
+
+        RydTask(String videoId, Context context) {
+            this.videoId = videoId;
+            this.context = context;
+        }
+
+        @Override
+        public String call() throws Exception {
+            return fetchRydLikes(videoId, context);
+        }
+    }
 
     /** The like and dislike counts from Return YouTube Dislike, as "likes\tdislikes". */
     private static String fetchRydLikes(String videoId, Context context) throws Exception {
@@ -2125,10 +2190,10 @@ public class InnertubeEndpoint implements Endpoint {
             .append("<youTubeId id='").append(safeId).append("'>").append(safeId).append("</youTubeId>")
             .append("<media:credit role='uploader' yt:display='").append(safeChannel)
             .append("' name='").append(safeChannelId).append("'>").append(safeChannelId)
-            .append("</media:credit></media:group><gd:rating average='5' max='5' min='1' numRaters='0' rel='http://schemas.google.com/g/2005#overall'/>")
+            .append("</media:credit></media:group>").append(gdRating(video.likes, video.dislikes))
             .append("<yt:statistics favoriteCount='0' viewCount='").append(numericCount(video.views)).append("'/>")
             .append("<yt:rating numLikes='").append(numericCount(video.likes))
-            .append("' numDislikes='0'/>");
+            .append("' numDislikes='").append(numericCount(video.dislikes)).append("'/>");
         if (position > 0) xml.append("<yt:position>").append(position).append("</yt:position>");
         xml.append("</entry>");
     }

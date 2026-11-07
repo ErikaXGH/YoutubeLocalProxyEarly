@@ -88,7 +88,8 @@ public class MostPopularEndpoint implements Endpoint {
 
         if (useDataApi) {
             try {
-                String xml = fetchAndBuildAtom(region, categoryId, categoryName, resultLimit, apiKey);
+                String xml = fetchAndBuildAtom(region, categoryId, categoryName, resultLimit, apiKey,
+                        config, context);
                 if (xml != null && xml.contains("<entry>")) {
                     HttpClient.writeFile(cacheFile, xml);
                     return atomResponse(xml, session);
@@ -123,7 +124,8 @@ public class MostPopularEndpoint implements Endpoint {
 
     // ---------------------------------------------------------------------
         private String fetchAndBuildAtom(String region, String categoryId, String categoryName,
-                                                                         int resultLimit, String apiKey) throws Exception {
+                                                                         int resultLimit, String apiKey, Config config,
+                                                                         Context context) throws Exception {
         String url = "https://www.googleapis.com/youtube/v3/videos"
                 + "?part=snippet,contentDetails,statistics"
                 + "&chart=mostPopular"
@@ -168,6 +170,14 @@ public class MostPopularEndpoint implements Endpoint {
         sb.append("  <openSearch:totalResults>").append(items.length()).append("</openSearch:totalResults>\n");
         sb.append("  <openSearch:startIndex>1</openSearch:startIndex>\n");
         sb.append("  <openSearch:itemsPerPage>").append(resultLimit).append("</openSearch:itemsPerPage>\n");
+
+        // Dislikes from Return YouTube Dislike, read for the whole page side by side.
+        java.util.Map<String, String> dislikes = new java.util.HashMap<String, String>();
+        if (config.getBool("ryd_enabled", false)) {
+            java.util.List<String> ids = new java.util.ArrayList<String>();
+            for (int i = 0; i < items.length(); i++) ids.add(items.optJSONObject(i) == null ? "" : items.optJSONObject(i).optString("id"));
+            dislikes = InnertubeEndpoint.rydDislikes(ids, context, 2500);
+        }
 
         int emitted = 0;
         for (int i = 0; i < items.length() && emitted < resultLimit; i++) {
@@ -287,11 +297,12 @@ public class MostPopularEndpoint implements Endpoint {
                     .append(escapeXml(videoId)).append("</youTubeId>\n");
             sb.append("    </media:group>\n");
 
-            sb.append("    <gd:rating average='0' max='5' min='1' numRaters='0'")
-                    .append(" rel='http://schemas.google.com/g/2005#overall'/>\n");
+            String dislikeCount = dislikes.containsKey(videoId) ? dislikes.get(videoId) : "0";
+            sb.append("    ").append(InnertubeEndpoint.gdRating(Long.toString(likeCount), dislikeCount)).append("\n");
             sb.append("    <yt:statistics favoriteCount='").append(favCount)
                     .append("' viewCount='").append(viewCount).append("'/>\n");
-            sb.append("    <yt:rating numDislikes='0' numLikes='").append(likeCount).append("'/>\n");
+            sb.append("    <yt:rating numDislikes='").append(InnertubeEndpoint.numericCount(dislikeCount))
+                    .append("' numLikes='").append(likeCount).append("'/>\n");
             sb.append("  </entry>\n");
 
             emitted++;
