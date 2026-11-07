@@ -1335,6 +1335,12 @@ public class InnertubeEndpoint implements Endpoint {
         headers.put("Referer", client == null
                 ? defaultReferer : client.optString("originalUrl", defaultReferer));
         headers.put("Accept", "*/*");
+        // A signed-in session (see YouTubeAuth) goes with the web clients, the ones a browser
+        // signs in with; the app clients (ANDROID, IOS...) would need an OAuth token instead.
+        if (YouTubeAuth.signedIn() && ("WEB".equals(clientName) || "MWEB".equals(clientName))) {
+            YouTubeAuth.sign(headers, "MWEB".equals(clientName)
+                    ? "https://m.youtube.com" : "https://www.youtube.com");
+        }
         if (extraHeaders != null) headers.putAll(extraHeaders);
 
         if (userAgent == null || userAgent.trim().isEmpty()) {
@@ -1369,6 +1375,21 @@ public class InnertubeEndpoint implements Endpoint {
         if ("MWEB".equals(clientName)) return "2";
         if ("ANDROID".equals(clientName)) return "3";
         return "";
+    }
+
+    /**
+     * A feed of the signed-in account (FEwhat_to_watch: its recommendations, FEsubscriptions: the
+     * newest uploads of its channels); empty when not signed in or when YouTube gave nothing.
+     */
+    static List<Video> accountFeed(String browseId, int limit, Config config) {
+        if (!YouTubeAuth.signedIn()) return new ArrayList<Video>();
+        try {
+            JSONObject response = post("browse", context(config).put("browseId", browseId), config);
+            return collectVideos(response, limit);
+        } catch (Exception e) {
+            android.util.Log.w("YouTubeAuth", "feed " + browseId + " failed: " + e);
+            return new ArrayList<Video>();
+        }
     }
 
     static JSONObject request(String endpoint, JSONObject payload, Config config) throws Exception {

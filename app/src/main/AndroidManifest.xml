@@ -24,6 +24,7 @@
             android:name=".SettingsActivity"
             android:label="Settings"
             android:exported="false" />
+        <activity android:name="com.viitube.proxy.LoginActivity" android:label="Sign in to YouTube" />
 
         <service
             android:name=".ProxyService"

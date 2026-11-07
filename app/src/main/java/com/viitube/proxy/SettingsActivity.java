@@ -198,6 +198,7 @@ public class SettingsActivity extends Activity {
     private float density;
     private String category;
     private EditText apiKey;
+    private Button account;
     private EditText invidious;
     private EditText invidiousList;
     private RadioGroup playbackModes;
@@ -440,6 +441,52 @@ public class SettingsActivity extends Activity {
                 "Optional. With a key of your own the popular feeds come from the Data API, and "
                         + "upload descriptions and exact view counts are filled in. Without one "
                         + "everything is read from the same pages the apps would read.");
+
+        YouTubeAuth.init(this);
+        account = new Button(this);
+        account.setOnClickListener(new AccountButton(this));
+        option(screen, "YouTube account", account,
+                "Sign in with Google's own page, inside this app; the proxy then keeps the "
+                        + "session cookies youtube.com sets (on this phone only, never in the "
+                        + "config or a crash report) and signs the requests it makes, so the home "
+                        + "feed is your recommendations and Subscriptions shows your channels. "
+                        + "Your password never passes through the proxy.");
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        refreshAccount();
+    }
+
+    void refreshAccount() {
+        if (account != null) {
+            account.setText(YouTubeAuth.signedIn()
+                    ? "Sign out" + (YouTubeAuth.accountName().isEmpty() ? "" : " (" + YouTubeAuth.accountName() + ")")
+                    : "Sign in to YouTube");
+        }
+    }
+
+    /** Signs in (opens Google's page) or signs out, depending on the session. */
+    private static final class AccountButton implements View.OnClickListener {
+        private final SettingsActivity screen;
+
+        AccountButton(SettingsActivity screen) {
+            this.screen = screen;
+        }
+
+        @Override
+        public void onClick(View view) {
+            if (YouTubeAuth.signedIn()) {
+                YouTubeAuth.signOut();
+                android.webkit.CookieSyncManager.createInstance(screen);
+                android.webkit.CookieManager.getInstance().removeAllCookie();
+                screen.refreshAccount();
+                Toast.makeText(screen, "Signed out of YouTube", Toast.LENGTH_SHORT).show();
+            } else {
+                screen.startActivity(new Intent(screen, LoginActivity.class));
+            }
+        }
     }
 
     private void storage(LinearLayout screen) {

@@ -227,6 +227,22 @@ public class YoutubeiEndpoint implements Endpoint {
         long now = System.currentTimeMillis();
         android.util.Log.i(TAG, "browse " + id + " (app " + version + ", " + gl + ")");
 
+        if (id.startsWith("FEwhat_to_watch") && YouTubeAuth.signedIn()) {
+            // Signed in: the account's own recommendations, as youtube.com shows them.
+            String key = "home_account_" + Integer.toHexString(YouTubeAuth.accountName().hashCode()) + "_" + (version >= YoutubeiResponses.PIVOT_BAR_VERSION ? "v12" : version >= 11 ? "v11" : "v10");
+            byte[] cached = cached(context, key, POPULAR_MAX_AGE_MS);
+            if (cached != null) return protobuf(cached);
+            List<InnertubeEndpoint.Video> home = InnertubeEndpoint.accountFeed("FEwhat_to_watch", 30, config);
+            if (!home.isEmpty()) {
+                boolean v11 = version >= 11;
+                List<InnertubeEndpoint.Video> second = v11 ? home : popular(gl, "Music", 20, config);
+                byte[] answer = YoutubeiResponses.home(version, home, second, now,
+                        v11 && version >= YoutubeiResponses.PIVOT_BAR_VERSION
+                                ? feedAvatars(home, config) : NO_AVATARS);
+                store(context, key, answer);
+                return protobuf(answer);
+            }
+        }
         if (id.startsWith("FEwhat_to_watch")) {
             final boolean v11 = version >= 11;
             String key = "home_" + gl + "_"
@@ -261,6 +277,19 @@ public class YoutubeiEndpoint implements Endpoint {
                     feedCards ? feedAvatars(videos, config) : NO_AVATARS);
             if (!videos.isEmpty()) store(context, key, answer);
             return protobuf(answer);
+        }
+        if (id.startsWith("FEsubscriptions") && YouTubeAuth.signedIn()) {
+            String key = "subscriptions_account_" + Integer.toHexString(YouTubeAuth.accountName().hashCode()) + (version >= YoutubeiResponses.PIVOT_BAR_VERSION ? "_v12" : "");
+            byte[] cached = cached(context, key, 5L * 60 * 1000);
+            if (cached != null) return protobuf(cached);
+            List<InnertubeEndpoint.Video> videos = InnertubeEndpoint.accountFeed("FEsubscriptions", 40, config);
+            if (!videos.isEmpty()) {
+                boolean feedCards = version >= YoutubeiResponses.PIVOT_BAR_VERSION;
+                byte[] answer = YoutubeiResponses.videoList("FEsubscriptions", "Subscriptions", videos, now,
+                        feedCards, feedCards ? feedAvatars(videos, config) : NO_AVATARS);
+                store(context, key, answer);
+                return protobuf(answer);
+            }
         }
         if (id.startsWith("FEsubscriptions")) return protobuf(YoutubeiResponses.subscriptions());
         if (id.startsWith("FElibrary")) return protobuf(YoutubeiResponses.library());
