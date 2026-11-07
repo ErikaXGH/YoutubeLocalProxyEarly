@@ -18,11 +18,14 @@ import org.json.JSONObject;
  */
 public class LoginActivity extends Activity {
 
-    /** Google's sign-in for YouTube, coming back to youtube.com so its cookies get set. */
+    /**
+     * Google's light sign-in for YouTube (flowName=WebLiteSignIn, the one TubeReplacer opens): the
+     * plain older page instead of the full one, coming back to youtube.com's ytscframe so the
+     * youtube.com session cookies get set.
+     */
     private static final String SIGN_IN_URL = "https://accounts.google.com/ServiceLogin"
-            + "?service=youtube&uilel=3&passive=true&hl=pl"
-            + "&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue"
-            + "%26app%3Dm%26hl%3Dpl%26next%3Dhttps%253A%252F%252Fm.youtube.com%252F";
+            + "?service=youtube&uilel=3&passive=true"
+            + "&continue=https://m.youtube.com/ytscframe&app=m&hl=pl&next=%2F&flowName=WebLiteSignIn";
 
     private volatile boolean finishing;
 
