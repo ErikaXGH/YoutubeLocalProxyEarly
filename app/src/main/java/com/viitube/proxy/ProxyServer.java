@@ -88,6 +88,7 @@ public class ProxyServer extends NanoHTTPD {
         register("/art/**", new GpmEndpoint());
         register("/youtube/accounts/registerDevice", new RegisterDeviceEndpoint());
         register("/proxy/ytbt", new RegisterDeviceEndpoint());
+        register("/proxy/token", new ProxyLoginEndpoint());
         register("/feeds/api/standardfeeds/*/most_popular", new MostPopularEndpoint());
         register("/feeds/api/standardfeeds/*/most_popular/*", new MostPopularEndpoint());
         register("/feeds/api/standardfeeds/*/*", new MostPopularEndpoint());
