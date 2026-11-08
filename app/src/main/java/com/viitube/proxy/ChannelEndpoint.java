@@ -162,12 +162,91 @@ public class ChannelEndpoint implements Endpoint {
         return uploads;
     }
 
+    /** The Videos tab's sort chips, in youtube.com's order: Latest, Popular, Oldest. */
+    static final int SORT_POPULAR = 1;
+    static final int SORT_OLDEST = 2;
+
+    /**
+     * The uploads in the order of one of the Videos tab's sort chips: the tab is loaded, the
+     * chip's own continuation token fetched and paged like the tab itself.
+     */
+    static Uploads loadSortedUploads(String channelId, int sort, int limit, Config config)
+            throws Exception {
+        Uploads uploads = new Uploads();
+        JSONObject tab = InnertubeEndpoint.request("browse", InnertubeEndpoint.context(config)
+                .put("browseId", channelId).put("params", UPLOADS_TAB_PARAMS), config);
+        List<JSONObject> chips = new ArrayList<JSONObject>();
+        collectChips(tab, chips);
+        String token = chips.size() > sort ? findFirst(chips.get(sort).opt("tapCommand"), "token") : "";
+        if (token.isEmpty()) return sortLocally(channelId, sort, config);
+        JSONObject first = InnertubeEndpoint.request("browse",
+                InnertubeEndpoint.context(config).put("continuation", token), config);
+        pageUploads(first, limit, config, uploads);
+        for (InnertubeEndpoint.Video video : uploads.videos) {
+            if (isChannelId(channelId)) video.channelId = channelId;
+        }
+        return uploads;
+    }
+
+    /**
+     * Small channels get no sort chips from YouTube; their uploads (few enough to load at once)
+     * are sorted here: oldest first, or by view count.
+     */
+    private static Uploads sortLocally(String channelId, int sort, Config config) throws Exception {
+        Uploads uploads = loadUploads(channelId, 200, config);
+        if (sort == SORT_OLDEST) {
+            java.util.Collections.reverse(uploads.videos);
+        } else {
+            java.util.Collections.sort(uploads.videos, new ViewsDescending());
+        }
+        uploads.hasMore = false;
+        return uploads;
+    }
+
+    private static final class ViewsDescending implements java.util.Comparator<InnertubeEndpoint.Video> {
+        @Override
+        public int compare(InnertubeEndpoint.Video a, InnertubeEndpoint.Video b) {
+            long va = views(a.views);
+            long vb = views(b.views);
+            return va < vb ? 1 : va > vb ? -1 : 0;
+        }
+
+        private static long views(String text) {
+            return text == null ? 0 : YoutubeiResponses.parseCount(text);
+        }
+    }
+
+    private static void collectChips(Object node, List<JSONObject> out) {
+        if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            JSONObject chip = object.optJSONObject("chipViewModel");
+            if (chip == null) chip = object.optJSONObject("chipCloudChipRenderer");
+            if (chip != null) {
+                out.add(chip);
+                return;
+            }
+            java.util.Iterator<String> names = object.keys();
+            for (int i = 0; names != null && names.hasNext(); i++) {
+                collectChips(object.opt(names.next()), out);
+            }
+        } else if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length(); i++) collectChips(array.opt(i), out);
+        }
+    }
+
     private static void loadUploadsTab(String channelId, int limit, Config config, Uploads uploads)
             throws Exception {
         String continuation = InnertubeEndpoint.browseContinuation(channelId, UPLOADS_TAB_PARAMS);
         JSONObject currentPage = InnertubeEndpoint.requestFast("browse",
                 InnertubeEndpoint.context(config).put("continuation", continuation), config);
-        continuation = "";
+        pageUploads(currentPage, limit, config, uploads);
+    }
+
+    /** Reads the videos of a Videos tab answer and of its next pages, up to {@code limit}. */
+    private static void pageUploads(JSONObject currentPage, int limit, Config config, Uploads uploads)
+            throws Exception {
+        String continuation = "";
         for (int page = 0; page < 40 && uploads.videos.size() < limit; page++) {
             JSONObject metadata = currentPage.optJSONObject("metadata");
             JSONObject channel = metadata == null ? null : metadata.optJSONObject("channelMetadataRenderer");
@@ -292,6 +371,105 @@ public class ChannelEndpoint implements Endpoint {
         final List<String[]> links = new ArrayList<String[]>();
         /** YouTube's token for the About panel, read from the header's description. */
         String aboutToken = "";
+        /** The Home tab's spotlight video (channelVideoPlayerRenderer), null when there is none. */
+        InnertubeEndpoint.Video spotlight;
+        /** The Home tab's shelves, in their order. */
+        final List<HomeShelf> shelves = new ArrayList<HomeShelf>();
+    }
+
+    /** One shelf of a channel's Home tab: videos, playlists or channels under a title. */
+    static final class HomeShelf {
+        String title = "";
+        final List<InnertubeEndpoint.Video> videos = new ArrayList<InnertubeEndpoint.Video>();
+        final List<PlaylistSummary> playlists = new ArrayList<PlaylistSummary>();
+        /** {channel id, name, avatar, subscribers}. */
+        final List<String[]> channels = new ArrayList<String[]>();
+
+        boolean isEmpty() {
+            return videos.isEmpty() && playlists.isEmpty() && channels.isEmpty();
+        }
+    }
+
+    /**
+     * The Home tab of youtube.com's channel page: the spotlight video and the shelves (New
+     * uploads, Popular videos, the channel's playlists, featured channels). Post and Shorts
+     * shelves are left out: the Community tab and the app have their own places for those.
+     */
+    private static void readHome(JSONObject root, ChannelInfo info) {
+        JSONObject home = null;
+        List<JSONObject> tabs = new ArrayList<JSONObject>();
+        collectRenderers(root, new String[]{"tabRenderer"}, tabs, 20);
+        for (JSONObject tab : tabs) {
+            if (tab.optBoolean("selected", false) && tab.has("content")) {
+                home = tab.optJSONObject("content");
+                break;
+            }
+        }
+        if (home == null) return;
+        JSONObject sectionList = home.optJSONObject("sectionListRenderer");
+        JSONArray sections = sectionList == null ? null : sectionList.optJSONArray("contents");
+        for (int i = 0; sections != null && i < sections.length(); i++) {
+            JSONObject itemSection = sections.optJSONObject(i) == null
+                    ? null : sections.optJSONObject(i).optJSONObject("itemSectionRenderer");
+            JSONArray contents = itemSection == null ? null : itemSection.optJSONArray("contents");
+            for (int j = 0; contents != null && j < contents.length(); j++) {
+                JSONObject item = contents.optJSONObject(j);
+                if (item == null) continue;
+                JSONObject player = item.optJSONObject("channelVideoPlayerRenderer");
+                if (player != null && info.spotlight == null) {
+                    InnertubeEndpoint.Video video = new InnertubeEndpoint.Video();
+                    video.id = player.optString("videoId", "");
+                    video.title = text(player.optJSONObject("title"));
+                    video.views = text(player.optJSONObject("viewCountText"));
+                    video.published = text(player.optJSONObject("publishedTimeText"));
+                    video.description = text(player.optJSONObject("description"));
+                    video.channel = info.name;
+                    video.channelId = info.id;
+                    if (video.id.matches("[A-Za-z0-9_-]{11}")) info.spotlight = video;
+                }
+                JSONObject shelf = item.optJSONObject("shelfRenderer");
+                if (shelf != null) {
+                    HomeShelf home1 = readShelf(shelf, info);
+                    if (!home1.isEmpty()) info.shelves.add(home1);
+                }
+            }
+        }
+    }
+
+    private static HomeShelf readShelf(JSONObject shelf, ChannelInfo info) {
+        HomeShelf result = new HomeShelf();
+        result.title = text(shelf.optJSONObject("title"));
+        JSONObject content = shelf.optJSONObject("content");
+        if (content == null) return result;
+        List<JSONObject> channels = new ArrayList<JSONObject>();
+        collectRenderers(content, new String[]{"gridChannelRenderer", "channelRenderer"}, channels, 30);
+        for (JSONObject channel : channels) {
+            String id = channel.optString("channelId", "");
+            if (!id.matches("UC[A-Za-z0-9_-]{22}")) continue;
+            String avatar = "";
+            JSONObject thumbnail = channel.optJSONObject("thumbnail");
+            JSONArray thumbnails = thumbnail == null ? null : thumbnail.optJSONArray("thumbnails");
+            if (thumbnails != null && thumbnails.length() > 0) {
+                avatar = InnertubeEndpoint.absoluteUrl(thumbnails.optJSONObject(thumbnails.length() - 1)
+                        .optString("url", ""));
+            }
+            String subscribers = text(channel.optJSONObject("subscriberCountText"));
+            result.channels.add(new String[]{id, text(channel.optJSONObject("title")), avatar, subscribers});
+        }
+        if (!result.channels.isEmpty()) return result;
+        collectPlaylists(content, result.playlists);
+        if (!result.playlists.isEmpty()) return result;
+        for (JSONObject renderer : collectVideoRenderers(content, 30)) {
+            // Lockups also stand for playlists and posts; only videos go in here.
+            if (renderer.has("contentType")
+                    && !"LOCKUP_CONTENT_TYPE_VIDEO".equals(renderer.optString("contentType"))) continue;
+            InnertubeEndpoint.Video video = InnertubeEndpoint.parseVideo(renderer);
+            if (video == null || video.id.isEmpty()) continue;
+            if (video.channel.isEmpty()) video.channel = info.name;
+            if (video.channelId.isEmpty()) video.channelId = info.id;
+            result.videos.add(video);
+        }
+        return result;
     }
 
     /** Channel details from the channel's browse page (cached for an hour, like the profile). */
@@ -384,6 +562,11 @@ public class ChannelEndpoint implements Endpoint {
         // The "...more" of the header's description opens the About panel; its token loads it.
         if (headerViewModel != null) {
             info.aboutToken = findText(headerViewModel.optJSONObject("description"), "token");
+        }
+        try {
+            readHome(root, info);
+        } catch (RuntimeException e) {
+            android.util.Log.w("ChannelEndpoint", "Home shelves unreadable for " + id + ": " + e);
         }
         return info;
     }
@@ -550,10 +733,10 @@ public class ChannelEndpoint implements Endpoint {
                 String token = findFirst(viewModel.opt("continuationCommand"), "token");
                 if (!token.isEmpty()) return token;
             }
-            JSONArray names = object.names();
+            java.util.Iterator<String> names = object.keys();
             if (names != null) {
-                for (int i = 0; i < names.length(); i++) {
-                    String token = findUploadContinuation(object.opt(names.optString(i)));
+                for (int i = 0; names.hasNext(); i++) {
+                    String token = findUploadContinuation(object.opt(names.next()));
                     if (!token.isEmpty()) return token;
                 }
             }
@@ -599,6 +782,53 @@ public class ChannelEndpoint implements Endpoint {
         String comments = "";
         /** The picture that goes with the post, when it has one. */
         String image = "";
+        /** The same picture at full size, opened when it is tapped. */
+        String imageFull = "";
+        /** youtube.com's performCommentActionEndpoint tokens of the like and dislike toggles. */
+        String likeAction = "";
+        String unlikeAction = "";
+        String dislikeAction = "";
+        String undislikeAction = "";
+        /** "LIKE", "DISLIKE" or "INDIFFERENT", for the signed-in account. */
+        String voteStatus = "";
+        /** The text as runs of {text, link address or null}. */
+        final List<String[]> runs = new ArrayList<String[]>();
+    }
+
+    /** The action token of a like or dislike toggle: {default (do), toggled (undo)}. */
+    private static String[] toggleActions(JSONObject buttons, String name) {
+        JSONObject button = buttons == null ? null : buttons.optJSONObject(name);
+        JSONObject toggle = button == null ? null : button.optJSONObject("toggleButtonRenderer");
+        if (toggle == null) return new String[]{"", ""};
+        return new String[]{
+                findText(toggle.optJSONObject("defaultServiceEndpoint"), "action"),
+                findText(toggle.optJSONObject("toggledServiceEndpoint"), "action")};
+    }
+
+    private static final java.util.regex.Pattern REDIRECT_TARGET = java.util.regex.Pattern.compile("[?&]q=([^&]+)");
+
+    /** The address a run of youtube.com text links to, or null. */
+    private static String runLink(JSONObject run) {
+        JSONObject endpoint = run.optJSONObject("navigationEndpoint");
+        if (endpoint == null) return null;
+        JSONObject url = endpoint.optJSONObject("urlEndpoint");
+        if (url != null) {
+            String address = url.optString("url", "");
+            // youtube.com/redirect?...&q=<the address>
+            java.util.regex.Matcher target = REDIRECT_TARGET.matcher(address);
+            if (address.contains("/redirect") && target.find()) {
+                try {
+                    return java.net.URLDecoder.decode(target.group(1), "UTF-8");
+                } catch (java.io.UnsupportedEncodingException e) {
+                    return address;
+                }
+            }
+            return address.startsWith("/") ? "https://www.youtube.com" + address : address;
+        }
+        JSONObject watch = endpoint.optJSONObject("watchEndpoint");
+        if (watch != null) return "https://www.youtube.com/watch?v=" + watch.optString("videoId", "");
+        String path = findText(endpoint.optJSONObject("commandMetadata"), "url");
+        return path.isEmpty() ? null : "https://www.youtube.com" + path;
     }
 
     /**
@@ -709,6 +939,22 @@ public class ChannelEndpoint implements Endpoint {
             // biggest one of these is a few thousand pixels wide for nothing.
             post.image = InnertubeEndpoint.absoluteUrl(
                     thumbnailAbout(image.optJSONObject("image"), 480));
+            post.imageFull = InnertubeEndpoint.absoluteUrl(
+                    thumbnailAbout(image.optJSONObject("image"), 1440));
+        }
+        JSONObject buttons = findObject(renderer.optJSONObject("actionButtons"), "commentActionButtonsRenderer");
+        String[] like = toggleActions(buttons, "likeButton");
+        String[] dislike = toggleActions(buttons, "dislikeButton");
+        post.likeAction = like[0];
+        post.unlikeAction = like[1];
+        post.dislikeAction = dislike[0];
+        post.undislikeAction = dislike[1];
+        post.voteStatus = renderer.optString("voteStatus", "");
+        JSONObject content = renderer.optJSONObject("contentText");
+        JSONArray runs = content == null ? null : content.optJSONArray("runs");
+        for (int i = 0; runs != null && i < runs.length(); i++) {
+            JSONObject run = runs.optJSONObject(i);
+            if (run != null) post.runs.add(new String[]{run.optString("text", ""), runLink(run)});
         }
         return post;
     }
@@ -756,9 +1002,9 @@ public class ChannelEndpoint implements Endpoint {
         if (node instanceof JSONObject) {
             JSONObject object = (JSONObject) node;
             if (object.has(key)) return object.optString(key, "");
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length(); i++) {
-                String found = findText(object.opt(names.optString(i)), key);
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) for (int i = 0; names.hasNext(); i++) {
+                String found = findText(object.opt(names.next()), key);
                 if (!found.isEmpty()) return found;
             }
         } else if (node instanceof JSONArray) {
@@ -925,9 +1171,9 @@ public class ChannelEndpoint implements Endpoint {
                 if (image != null) playlist.thumbnail = image.optString("url", "");
                 addPlaylist(result, playlist);
             }
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length(); i++) {
-                String key = names.optString(i);
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) for (int i = 0; names.hasNext(); i++) {
+                String key = names.next();
                 if ("lockupViewModel".equals(key)) continue;
                 collectPlaylists(object.opt(key), result);
             }
@@ -951,9 +1197,9 @@ public class ChannelEndpoint implements Endpoint {
         }
         if (node instanceof JSONObject) {
             JSONObject object = (JSONObject) node;
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length(); i++) {
-                String found = findMatchingString(object.opt(names.optString(i)), pattern);
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) for (int i = 0; names.hasNext(); i++) {
+                String found = findMatchingString(object.opt(names.next()), pattern);
                 if (!found.isEmpty()) return found;
             }
         } else if (node instanceof JSONArray) {
@@ -981,9 +1227,9 @@ public class ChannelEndpoint implements Endpoint {
                 JSONObject renderer = object.optJSONObject(key);
                 if (renderer != null && !result.contains(renderer)) result.add(renderer);
             }
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length() && result.size() < limit; i++)
-                collectRenderers(object.opt(names.optString(i)), keys, result, limit);
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) for (int i = 0; names.hasNext() && result.size() < limit; i++)
+                collectRenderers(object.opt(names.next()), keys, result, limit);
         } else if (node instanceof JSONArray) {
             JSONArray array = (JSONArray) node;
             for (int i = 0; i < array.length() && result.size() < limit; i++)
@@ -996,9 +1242,9 @@ public class ChannelEndpoint implements Endpoint {
             JSONObject object = (JSONObject) node;
             JSONObject found = object.optJSONObject(key);
             if (found != null) return found;
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length(); i++) {
-                found = findObject(object.opt(names.optString(i)), key);
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) for (int i = 0; names.hasNext(); i++) {
+                found = findObject(object.opt(names.next()), key);
                 if (found != null) return found;
             }
         } else if (node instanceof JSONArray) {
@@ -1015,9 +1261,9 @@ public class ChannelEndpoint implements Endpoint {
         if (node instanceof JSONObject) {
             JSONObject object = (JSONObject) node;
             if (object.has(key)) return object.optString(key, "");
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length(); i++) {
-                String found = findFirst(object.opt(names.optString(i)), key);
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) for (int i = 0; names.hasNext(); i++) {
+                String found = findFirst(object.opt(names.next()), key);
                 if (!found.isEmpty()) return found;
             }
         } else if (node instanceof JSONArray) {

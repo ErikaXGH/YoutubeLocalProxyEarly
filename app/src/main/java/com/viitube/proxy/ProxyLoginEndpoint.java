@@ -19,7 +19,14 @@ public class ProxyLoginEndpoint implements Endpoint {
     public NanoHTTPD.Response handle(NanoHTTPD.IHTTPSession session, String[] pathParams,
                                      Config config, Context context) {
         YouTubeAuth.init(context);
-        String body = YouTubeAuth.signedIn() ? "proxy-youtube-token" : "";
+        String body;
+        if (session.getUri().contains("/proxy/signedin")) {
+            body = YouTubeAuth.signedIn() ? "1" : "0";
+        } else if (session.getUri().contains("/proxy/account")) {
+            body = YouTubeAuth.signedIn() ? YouTubeAuth.accountEmail() : "";
+        } else {
+            body = YouTubeAuth.signedIn() ? "proxy-youtube-token" : "";
+        }
         NanoHTTPD.Response response = NanoHTTPD.newFixedLengthResponse(
                 NanoHTTPD.Response.Status.OK, "text/plain; charset=utf-8", body);
         response.addHeader("Cache-Control", "no-cache, no-store");

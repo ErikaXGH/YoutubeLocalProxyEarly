@@ -383,9 +383,9 @@ public class InnertubeEndpoint implements Endpoint {
                 String browseId = findFirst(item.optJSONObject("navigationEndpoint"), "browseId");
                 if (browseId.startsWith("VL")) return browseId.substring(2);
             }
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length(); i++) {
-                String found = findChartPlaylist(object.opt(names.optString(i)), titlePrefix);
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) for (int i = 0; names.hasNext(); i++) {
+                String found = findChartPlaylist(object.opt(names.next()), titlePrefix);
                 if (!found.isEmpty()) return found;
             }
         } else if (node instanceof JSONArray) {
@@ -622,10 +622,10 @@ public class InnertubeEndpoint implements Endpoint {
     private static void collectSearchCards(Object node, LoadedSearch loaded) {
         if (node instanceof JSONObject) {
             JSONObject object = (JSONObject) node;
-            JSONArray names = object.names();
+            java.util.Iterator<String> names = object.keys();
             if (names == null) return;
-            for (int i = 0; i < names.length(); i++) {
-                String key = names.optString(i);
+            for (int i = 0; names.hasNext(); i++) {
+                String key = names.next();
                 Object value = object.opt(key);
                 if (value instanceof JSONObject) {
                     JSONObject renderer = (JSONObject) value;
@@ -835,6 +835,8 @@ public class InnertubeEndpoint implements Endpoint {
         String subscribers = "";
         /** YouTube's own date label, for example "Oct 3, 2024". */
         String dateText = "";
+        /** The signed-in account's rating of the video: LIKE, DISLIKE or INDIFFERENT ("" signed out). */
+        String likeStatus = "";
         final List<Video> related = new ArrayList<Video>();
     }
 
@@ -865,6 +867,7 @@ public class InnertubeEndpoint implements Endpoint {
             }
             page.dateText = runs(primary.optJSONObject("dateText"));
         }
+        if (YouTubeAuth.signedIn()) page.likeStatus = findFirst(response, "likeStatus");
         JSONObject owner = firstObject(response, "videoOwnerRenderer");
         if (owner != null) {
             page.video.channel = runs(owner.optJSONObject("title"));
@@ -1032,6 +1035,73 @@ public class InnertubeEndpoint implements Endpoint {
         String likeCount = "";
         /** The number of replies as YouTube wrote it, empty when none. */
         String replyCount = "";
+        /** youtube.com's performCommentActionEndpoint tokens of the comment's toolbar. */
+        String likeAction = "";
+        String unlikeAction = "";
+        String dislikeAction = "";
+        String undislikeAction = "";
+        /** "LIKE", "DISLIKE" or "INDIFFERENT", for the signed-in account. */
+        String voteStatus = "";
+        /** The like count with the account's like in it ("likeCountLiked"). */
+        String likeCountLiked = "";
+    }
+
+    /**
+     * Adds the toolbar of each comment entity: today's answers keep the like/dislike tokens in
+     * engagementToolbarSurfaceEntityPayload and the like state in
+     * engagementToolbarStateEntityPayload, both found through the commentViewModel's keys.
+     */
+    private static void attachToolbars(JSONObject response, List<JSONObject> threads) {
+        try {
+            java.util.Map<String, JSONObject> entities = new java.util.HashMap<String, JSONObject>();
+            JSONObject updates = response.optJSONObject("frameworkUpdates");
+            JSONObject batch = updates == null ? null : updates.optJSONObject("entityBatchUpdate");
+            JSONArray mutations = batch == null ? null : batch.optJSONArray("mutations");
+            for (int i = 0; mutations != null && i < mutations.length(); i++) {
+                JSONObject mutation = mutations.optJSONObject(i);
+                JSONObject payload = mutation == null ? null : mutation.optJSONObject("payload");
+                if (payload == null) continue;
+                entities.put(mutation.optString("entityKey", ""), payload);
+            }
+            if (entities.isEmpty()) return;
+            List<JSONObject> views = new ArrayList<JSONObject>();
+            collectObjects(response, "commentViewModel", views, 500);
+            java.util.Map<String, JSONObject> byId = new java.util.HashMap<String, JSONObject>();
+            for (JSONObject view : views) {
+                JSONObject model = view.optJSONObject("commentViewModel");
+                if (model == null) model = view;
+                String id = model.optString("commentId", "");
+                if (!id.isEmpty()) byId.put(id, model);
+            }
+            for (JSONObject thread : threads) {
+                JSONObject model = byId.get(thread.optString("commentId", ""));
+                if (model == null) continue;
+                JSONObject surface = entities.get(model.optString("toolbarSurfaceKey", ""));
+                surface = surface == null ? null : surface.optJSONObject("engagementToolbarSurfaceEntityPayload");
+                if (surface != null) {
+                    thread.put("likeAction", commandAction(surface, "likeCommand"));
+                    thread.put("unlikeAction", commandAction(surface, "unlikeCommand"));
+                    thread.put("dislikeAction", commandAction(surface, "dislikeCommand"));
+                    thread.put("undislikeAction", commandAction(surface, "undislikeCommand"));
+                }
+                JSONObject state = entities.get(model.optString("toolbarStateKey", ""));
+                state = state == null ? null : state.optJSONObject("engagementToolbarStateEntityPayload");
+                if (state != null) {
+                    String like = state.optString("likeState", "");
+                    thread.put("voteStatus", like.endsWith("_LIKED") ? "LIKE"
+                            : like.endsWith("_DISLIKED") ? "DISLIKE" : "INDIFFERENT");
+                }
+            }
+        } catch (JSONException e) {
+            // The comments stay without their toolbar.
+        }
+    }
+
+    private static String commandAction(JSONObject surface, String name) {
+        JSONObject command = surface.optJSONObject(name);
+        JSONObject inner = command == null ? null : command.optJSONObject("innertubeCommand");
+        JSONObject endpoint = inner == null ? null : inner.optJSONObject("performCommentActionEndpoint");
+        return endpoint == null ? "" : endpoint.optString("action", "");
     }
 
     /** The comment threads YouTube answers with, newest first. */
@@ -1040,7 +1110,7 @@ public class InnertubeEndpoint implements Endpoint {
         final int wanted = limit <= 0 ? 20 : limit;
         List<JSONObject> comments = new ArrayList<JSONObject>();
         JSONObject requestContext = commentRequestContext(config, videoId);
-        String continuation = initialCommentsContinuation(videoId);
+        String continuation = initialCommentsContinuation(videoId, false);
         JSONObject response = post("next", new JSONObject()
                 .put("context", requestContext.getJSONObject("context"))
                 .put("continuation", continuation), config);
@@ -1120,6 +1190,12 @@ public class InnertubeEndpoint implements Endpoint {
         // Like and reply counts: from the normalized entity fields, or the classic renderer's own.
         comment.likeCount = renderer.optString("likeCount", "");
         if (comment.likeCount.isEmpty()) comment.likeCount = runs(renderer.optJSONObject("voteCount"));
+        comment.likeAction = renderer.optString("likeAction", "");
+        comment.unlikeAction = renderer.optString("unlikeAction", "");
+        comment.dislikeAction = renderer.optString("dislikeAction", "");
+        comment.undislikeAction = renderer.optString("undislikeAction", "");
+        comment.voteStatus = renderer.optString("voteStatus", "");
+        comment.likeCountLiked = renderer.optString("likeCountLiked", "");
         comment.replyCount = renderer.optString("replyCount", "");
         if (comment.replyCount.isEmpty()) {
             JSONObject replies = thread.optJSONObject("replies");
@@ -1139,6 +1215,13 @@ public class InnertubeEndpoint implements Endpoint {
         String continuation = "";
         boolean started;
         long loadedAt;
+        /** youtube.com's short comment count ("2.4M"), from the first page's header. */
+        volatile String count = "";
+    }
+
+    /** The short comment count of a video ("9 tys."), "" when its comments are not read yet. */
+    static String commentsCount(String videoId) {
+        return commentsEntry(videoId, false).count;
     }
 
     private static final long COMMENTS_MAX_AGE_MS = 15L * 60 * 1000;
@@ -1150,12 +1233,14 @@ public class InnertubeEndpoint implements Endpoint {
                 }
             };
 
-    private static LoadedComments commentsEntry(String videoId) {
+    private static LoadedComments commentsEntry(String videoId, boolean newest) {
         synchronized (COMMENTS) {
-            LoadedComments loaded = COMMENTS.get(videoId);
+            // The account's like state is in the answer, so signed-in and anonymous lists differ.
+            String key = videoId + (newest ? "_n" : "") + (YouTubeAuth.signedIn() ? "_a" : "");
+            LoadedComments loaded = COMMENTS.get(key);
             if (loaded == null || System.currentTimeMillis() - loaded.loadedAt > COMMENTS_MAX_AGE_MS) {
                 loaded = new LoadedComments();
-                COMMENTS.put(videoId, loaded);
+                COMMENTS.put(key, loaded);
             }
             return loaded;
         }
@@ -1171,17 +1256,29 @@ public class InnertubeEndpoint implements Endpoint {
      * the phone stutter the moment the list reached the comments.
      */
     static List<Comment> comments(String videoId, int limit, Config config) throws Exception {
-        LoadedComments loaded = commentsEntry(videoId);
+        return comments(videoId, limit, config, false);
+    }
+
+    /** With {@code newest} the comments come newest first, as youtube.com's "Newest" sorts them. */
+    static List<Comment> comments(String videoId, int limit, Config config, boolean newest)
+            throws Exception {
+        LoadedComments loaded = commentsEntry(videoId, newest);
         synchronized (loaded) {
             JSONObject requestContext = commentRequestContext(config, videoId).getJSONObject("context");
             for (int request = 0; request < COMMENT_REQUESTS && loaded.comments.size() < limit; request++) {
                 if (loaded.started && loaded.continuation.isEmpty()) break;
-                String token = loaded.started ? loaded.continuation : initialCommentsContinuation(videoId);
+                String token = loaded.started ? loaded.continuation
+                        : initialCommentsContinuation(videoId, newest);
                 JSONObject response = post("next", new JSONObject()
                         .put("context", requestContext).put("continuation", token), config);
                 loaded.started = true;
                 loaded.loadedAt = System.currentTimeMillis();
                 int before = loaded.comments.size();
+                if (loaded.count.isEmpty()) {
+                    List<JSONObject> headers = new ArrayList<JSONObject>(1);
+                    collectObjects(response, "commentsHeaderRenderer", headers, 1);
+                    if (!headers.isEmpty()) loaded.count = runs(headers.get(0).optJSONObject("commentsCount"));
+                }
                 addComments(response, loaded, limit + COMMENT_PAGE);
                 String next = findCommentsContinuation(response);
                 // A page that brings nothing new, or points at itself, is the end of the list.
@@ -1194,8 +1291,8 @@ public class InnertubeEndpoint implements Endpoint {
     }
 
     /** Whether YouTube has more comments than the ones already read. */
-    static boolean hasMoreComments(String videoId, int shown) {
-        LoadedComments loaded = commentsEntry(videoId);
+    static boolean hasMoreComments(String videoId, int shown, boolean newest) {
+        LoadedComments loaded = commentsEntry(videoId, newest);
         synchronized (loaded) {
             return loaded.comments.size() > shown || !loaded.continuation.isEmpty();
         }
@@ -1206,6 +1303,7 @@ public class InnertubeEndpoint implements Endpoint {
             throws JSONException {
         List<JSONObject> threads = new ArrayList<JSONObject>();
         collectCommentEntities(response, threads, limit);
+        attachToolbars(response, threads);
         if (threads.isEmpty()) collectObjects(response, "commentThreadRenderer", threads, limit);
         if (threads.isEmpty()) collectObjects(response, "commentViewModel", threads, limit);
         for (JSONObject thread : threads) {
@@ -1265,10 +1363,21 @@ public class InnertubeEndpoint implements Endpoint {
         return xml.append("</feed>").toString();
     }
 
+    /**
+     * The Atom date format, one per thread: SimpleDateFormat is not thread-safe, and making one
+     * for every date of every feed entry was a measurable part of building a feed.
+     */
+    static final ThreadLocal<SimpleDateFormat> ATOM_DATE = new ThreadLocal<SimpleDateFormat>() {
+        @Override
+        protected SimpleDateFormat initialValue() {
+            SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
+            format.setTimeZone(TimeZone.getTimeZone("UTC"));
+            return format;
+        }
+    };
+
     static String utcNow() {
-        SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
-        format.setTimeZone(TimeZone.getTimeZone("UTC"));
-        return format.format(new java.util.Date());
+        return ATOM_DATE.get().format(new java.util.Date());
     }
 
     private String suggestions(String query, Config config) throws Exception {
@@ -1392,6 +1501,143 @@ public class InnertubeEndpoint implements Endpoint {
         }
     }
 
+    /**
+     * The channels the signed-in account subscribes to, as youtube.com's guide lists them (every
+     * guideEntryRenderer that opens a UC... channel): {id, name, avatar}, guide order.
+     */
+    static List<String[]> subscribedChannels(Config config) {
+        List<String[]> channels = new ArrayList<String[]>();
+        if (!YouTubeAuth.signedIn()) return channels;
+        List<String[]> cached = subscribedCache;
+        if (cached != null && System.currentTimeMillis() - subscribedAt < ACCOUNT_LISTS_TTL) {
+            return new ArrayList<String[]>(cached);
+        }
+        try {
+            JSONObject guide = post("guide", context(config), config);
+            collectGuideChannels(guide, channels, new java.util.HashSet<String>());
+            AccountActions.setSubscriptions(channels);
+            if (!channels.isEmpty()) {
+                subscribedCache = new ArrayList<String[]>(channels);
+                subscribedAt = System.currentTimeMillis();
+            }
+        } catch (Exception e) {
+            android.util.Log.w("YouTubeAuth", "subscribed channels failed: " + e);
+        }
+        return channels;
+    }
+
+    /**
+     * The account's channel list and playlists are kept for a few minutes: the Subscriptions
+     * feed, the channel pages and the Library each asked youtube.com for them again. Subscribing,
+     * unsubscribing and changing a playlist drop them (forgetAccountLists).
+     */
+    private static final long ACCOUNT_LISTS_TTL = 5L * 60 * 1000;
+    private static volatile List<String[]> subscribedCache;
+    private static volatile long subscribedAt;
+    private static volatile List<String[]> playlistsCache;
+    private static volatile long playlistsAt;
+
+    static void forgetAccountLists() {
+        subscribedCache = null;
+        playlistsCache = null;
+    }
+
+    private static final java.util.regex.Pattern LOCKUP_VIDEO_COUNT =
+            java.util.regex.Pattern.compile("\"text\":\"([\\d,.\\s]+)\\s*videos?\"");
+    private static final java.util.regex.Pattern LOCKUP_THUMBNAIL =
+            java.util.regex.Pattern.compile("\"url\":\"(https:[^\"]+)\"");
+
+    private static void collectGuideChannels(Object node, List<String[]> out, java.util.Set<String> seen) {
+        if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length(); i++) collectGuideChannels(array.opt(i), out, seen);
+            return;
+        }
+        if (!(node instanceof JSONObject)) return;
+        JSONObject object = (JSONObject) node;
+        JSONObject entry = object.optJSONObject("guideEntryRenderer");
+        if (entry != null) {
+            String id = entry.optJSONObject("navigationEndpoint") == null ? ""
+                    : entry.optJSONObject("navigationEndpoint").optJSONObject("browseEndpoint") == null ? ""
+                    : entry.optJSONObject("navigationEndpoint").optJSONObject("browseEndpoint").optString("browseId", "");
+            if (id.startsWith("UC") && seen.add(id)) {
+                String name = entry.optJSONObject("formattedTitle") != null
+                        ? entry.optJSONObject("formattedTitle").optString("simpleText", "") : "";
+                if (name.isEmpty()) name = entry.optString("title", "");
+                String avatar = "";
+                JSONObject thumbnail = entry.optJSONObject("thumbnail");
+                JSONArray thumbs = thumbnail == null ? null : thumbnail.optJSONArray("thumbnails");
+                if (thumbs != null && thumbs.length() > 0) {
+                    avatar = thumbs.optJSONObject(thumbs.length() - 1).optString("url", "");
+                    if (avatar.startsWith("//")) avatar = "https:" + avatar;
+                }
+                out.add(new String[]{id, name, avatar});
+            }
+        }
+        java.util.Iterator<String> keys = object.keys();
+        while (keys.hasNext()) collectGuideChannels(object.opt(keys.next()), out, seen);
+    }
+
+    /**
+     * The signed-in account's playlists as youtube.com's Playlists page lists them
+     * (FEplaylist_aggregation, lockupViewModel entries): {id, title, video count, thumbnail}, with
+     * Watch later and Liked videos first.
+     */
+    static List<String[]> accountPlaylists(Config config) {
+        List<String[]> playlists = new ArrayList<String[]>();
+        if (!YouTubeAuth.signedIn()) return playlists;
+        List<String[]> cached = playlistsCache;
+        if (cached != null && System.currentTimeMillis() - playlistsAt < ACCOUNT_LISTS_TTL) {
+            return new ArrayList<String[]>(cached);
+        }
+        try {
+            JSONObject page = post("browse", context(config).put("browseId", "FEplaylist_aggregation"), config);
+            List<JSONObject> lockups = new ArrayList<JSONObject>();
+            collectKey(page, "lockupViewModel", lockups);
+            for (JSONObject lockup : lockups) {
+                String id = lockup.optString("contentId", "");
+                if (id.isEmpty() || !"LOCKUP_CONTENT_TYPE_PLAYLIST".equals(lockup.optString("contentType"))) continue;
+                JSONObject metadata = lockup.optJSONObject("metadata");
+                JSONObject lockupMetadata = metadata == null ? null : metadata.optJSONObject("lockupMetadataViewModel");
+                JSONObject title = lockupMetadata == null ? null : lockupMetadata.optJSONObject("title");
+                String image = String.valueOf(lockup.optJSONObject("contentImage"));
+                java.util.regex.Matcher count = LOCKUP_VIDEO_COUNT.matcher(image);
+                java.util.regex.Matcher thumb = LOCKUP_THUMBNAIL.matcher(image);
+                String[] entry = {id, title == null ? id : title.optString("content", id),
+                        count.find() ? count.group(1).replaceAll("[^0-9]", "") : "",
+                        thumb.find() ? thumb.group(1).replace("\\/", "/") : ""};
+                if (id.equals("WL") || id.equals("LL")) {
+                    playlists.add(id.equals("WL") ? 0 : Math.min(1, playlists.size()), entry);
+                } else {
+                    playlists.add(entry);
+                }
+            }
+            if (!playlists.isEmpty()) {
+                playlistsCache = new ArrayList<String[]>(playlists);
+                playlistsAt = System.currentTimeMillis();
+            }
+        } catch (Exception e) {
+            android.util.Log.w("YouTubeAuth", "playlists failed: " + e);
+        }
+        return playlists;
+    }
+
+    private static void collectKey(Object node, String key, List<JSONObject> out) {
+        if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length(); i++) collectKey(array.opt(i), key, out);
+        } else if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            JSONObject found = object.optJSONObject(key);
+            if (found != null) out.add(found);
+            java.util.Iterator<String> keys = object.keys();
+            while (keys.hasNext()) {
+                String name = keys.next();
+                if (!name.equals(key)) collectKey(object.opt(name), key, out);
+            }
+        }
+    }
+
     static JSONObject request(String endpoint, JSONObject payload, Config config) throws Exception {
         return post(endpoint, payload, config);
     }
@@ -1429,7 +1675,7 @@ public class InnertubeEndpoint implements Endpoint {
         return requestContext;
     }
 
-    private static String initialCommentsContinuation(String videoId) throws IOException {
+    private static String initialCommentsContinuation(String videoId, boolean newest) throws IOException {
         ByteArrayOutputStream commentsRequest = new ByteArrayOutputStream();
 
         ByteArrayOutputStream videoMessage = new ByteArrayOutputStream();
@@ -1439,6 +1685,8 @@ public class InnertubeEndpoint implements Endpoint {
 
         ByteArrayOutputStream commentsData = new ByteArrayOutputStream();
         writeProtoString(commentsData, 4, videoId);
+        // Field 6 is the order: 0 top comments, 1 newest first.
+        if (newest) writeProtoVarintField(commentsData, 6, 1);
         writeProtoVarintField(commentsData, 15, 2);
 
         ByteArrayOutputStream commentsSection = new ByteArrayOutputStream();
@@ -1844,10 +2092,10 @@ public class InnertubeEndpoint implements Endpoint {
                     if (isValidVideoId(id) && !containsVideo(result, id)) result.add(parseVideo(renderer));
                 }
             }
-            JSONArray names = object.names();
+            java.util.Iterator<String> names = object.keys();
             if (names != null) {
-                for (int i = 0; i < names.length() && result.size() < limit; i++) {
-                    collectVideoObjects(object.opt(names.optString(i)), result, limit);
+                for (int i = 0; names.hasNext() && result.size() < limit; i++) {
+                    collectVideoObjects(object.opt(names.next()), result, limit);
                 }
             }
         } else if (node instanceof JSONArray) {
@@ -2067,6 +2315,28 @@ public class InnertubeEndpoint implements Endpoint {
 
     private static void collectCommentEntities(Object node, List<JSONObject> result, int limit)
             throws JSONException {
+        // Today's answers keep the entities in one list; reading it directly spares a walk
+        // through the whole answer (a megabyte of JSON) on every page of comments.
+        if (node instanceof JSONObject) {
+            JSONObject updates = ((JSONObject) node).optJSONObject("frameworkUpdates");
+            JSONObject batch = updates == null ? null : updates.optJSONObject("entityBatchUpdate");
+            JSONArray mutations = batch == null ? null : batch.optJSONArray("mutations");
+            if (mutations != null) {
+                for (int i = 0; i < mutations.length() && result.size() < limit; i++) {
+                    JSONObject mutation = mutations.optJSONObject(i);
+                    JSONObject payload = mutation == null ? null : mutation.optJSONObject("payload");
+                    if (payload != null && payload.has("commentEntityPayload")) {
+                        walkCommentEntities(payload, result, limit);
+                    }
+                }
+                if (!result.isEmpty()) return;
+            }
+        }
+        walkCommentEntities(node, result, limit);
+    }
+
+    private static void walkCommentEntities(Object node, List<JSONObject> result, int limit)
+            throws JSONException {
         if (result.size() >= limit) return;
         if (node instanceof JSONObject) {
             JSONObject object = (JSONObject) node;
@@ -2088,20 +2358,21 @@ public class InnertubeEndpoint implements Endpoint {
                             .put("author", author == null ? new JSONObject() : author)
                             .put("likeCountA11y", toolbar == null ? "" : toolbar.optString("likeCountA11y", ""))
                             .put("likeCount", toolbar == null ? "" : toolbar.optString("likeCountNotliked", ""))
+                            .put("likeCountLiked", toolbar == null ? "" : toolbar.optString("likeCountLiked", ""))
                             .put("replyCount", toolbar == null ? "" : toolbar.optString("replyCount", ""));
                     result.add(normalized);
                 }
             }
-            JSONArray names = object.names();
+            java.util.Iterator<String> names = object.keys();
             if (names != null) {
-                for (int i = 0; i < names.length() && result.size() < limit; i++) {
-                    collectCommentEntities(object.opt(names.optString(i)), result, limit);
+                for (int i = 0; names.hasNext() && result.size() < limit; i++) {
+                    walkCommentEntities(object.opt(names.next()), result, limit);
                 }
             }
         } else if (node instanceof JSONArray) {
             JSONArray array = (JSONArray) node;
             for (int i = 0; i < array.length() && result.size() < limit; i++) {
-                collectCommentEntities(array.opt(i), result, limit);
+                walkCommentEntities(array.opt(i), result, limit);
             }
         }
     }
@@ -2266,9 +2537,9 @@ public class InnertubeEndpoint implements Endpoint {
             JSONObject object = (JSONObject) node;
             JSONObject found = object.optJSONObject(key);
             if (found != null) result.add(found);
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length() && result.size() < limit; i++)
-                collectObjects(object.opt(names.optString(i)), key, result, limit);
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) for (int i = 0; names.hasNext() && result.size() < limit; i++)
+                collectObjects(object.opt(names.next()), key, result, limit);
         } else if (node instanceof JSONArray) {
             JSONArray array = (JSONArray) node;
             for (int i = 0; i < array.length() && result.size() < limit; i++) collectObjects(array.opt(i), key, result, limit);
@@ -2305,9 +2576,9 @@ public class InnertubeEndpoint implements Endpoint {
         if (node instanceof JSONObject) {
             JSONObject object = (JSONObject) node;
             if (object.has(key)) return object.optString(key, "");
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length(); i++) {
-                String found = findFirst(object.opt(names.optString(i)), key);
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) for (int i = 0; names.hasNext(); i++) {
+                String found = findFirst(object.opt(names.next()), key);
                 if (!found.isEmpty()) return found;
             }
         } else if (node instanceof JSONArray) {
@@ -2320,11 +2591,17 @@ public class InnertubeEndpoint implements Endpoint {
         return "";
     }
 
+    private static final java.util.regex.Pattern ISO_DURATION =
+            java.util.regex.Pattern.compile("(?:(\\d+)H)?(?:(\\d+)M)?(?:(\\d+)S)?");
+    private static final java.util.regex.Pattern RELATIVE_AGE = java.util.regex.Pattern.compile(
+            "(\\d+)\\s*(seconds?|minutes?|hours?|days?|weeks?|months?|years?|s|m|h|d|w|mo|y)\\s+ago",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
+
     static int durationSecondsPublic(String duration) {
         if (duration == null || duration.isEmpty()) return 0;
         try { return Integer.parseInt(duration); } catch (NumberFormatException ignored) { }
         int total = 0;
-        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(?:(\\d+)H)?(?:(\\d+)M)?(?:(\\d+)S)?").matcher(duration);
+        java.util.regex.Matcher matcher = ISO_DURATION.matcher(duration);
         if (duration.startsWith("PT") && matcher.matches()) {
             try { total += Integer.parseInt(matcher.group(1)) * 3600; } catch (Exception ignored) { }
             try { total += Integer.parseInt(matcher.group(2)) * 60; } catch (Exception ignored) { }
@@ -2381,9 +2658,9 @@ public class InnertubeEndpoint implements Endpoint {
                 if (token.isEmpty()) token = findFirst(object, "token");
                 if (!token.isEmpty()) return token;
             }
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length(); i++) {
-                String key = names.optString(i);
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) for (int i = 0; names.hasNext(); i++) {
+                String key = names.next();
                 String found = findCommentContinuation(object.opt(key), key);
                 if (!found.isEmpty()) return found;
             }
@@ -2430,14 +2707,10 @@ public class InnertubeEndpoint implements Endpoint {
                         + Integer.parseInt(digits.substring(2, 4))) * 60_000L;
                 time -= zone.charAt(0) == '-' ? -offset : offset;
             }
-            SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
-            format.setTimeZone(TimeZone.getTimeZone("UTC"));
-            return format.format(new java.util.Date(time));
+            return ATOM_DATE.get().format(new java.util.Date(time));
         }
         long age = 0;
-        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(
-                "(\\d+)\\s*(seconds?|minutes?|hours?|days?|weeks?|months?|years?|s|m|h|d|w|mo|y)\\s+ago",
-                java.util.regex.Pattern.CASE_INSENSITIVE).matcher(source == null ? "" : source);
+        java.util.regex.Matcher matcher = RELATIVE_AGE.matcher(source == null ? "" : source);
         if (matcher.find()) {
             long amount = Long.parseLong(matcher.group(1));
             String unit = matcher.group(2).toLowerCase(Locale.US);
@@ -2449,9 +2722,7 @@ public class InnertubeEndpoint implements Endpoint {
             else if (unit.startsWith("month") || "mo".equals(unit)) age = amount * 2_592_000_000L;
             else if (unit.startsWith("year") || "y".equals(unit)) age = amount * 31_536_000_000L;
         }
-        SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
-        format.setTimeZone(TimeZone.getTimeZone("UTC"));
-        return format.format(new java.util.Date(System.currentTimeMillis() - age));
+        return ATOM_DATE.get().format(new java.util.Date(System.currentTimeMillis() - age));
     }
 
     static class Video {

@@ -2036,13 +2036,25 @@ public final class VideoListProto {
         public AccountTabLink setNavigation(VideoListProto.BrowseNavigation value) { mNavigation = value; return this; }
         public VideoListProto.BrowseNavigation getNavigation() { return mNavigation; }
         public boolean hasNavigation() { return mNavigation != null; }
+        // Hand-added (compactLinkRenderer acgl of 12.45.56): subtitle = 13 (FormattedString), a
+        // title given as raw FormattedString bytes (for colored runs), and a navigation endpoint
+        // given as raw bytes for endpoints this file has no class for.
+        private VideoListProto.TextRuns mSubtitle;
+        private byte[] mRawNavigation;
+        private byte[] mRawTitle;
+        public AccountTabLink setSubtitle(VideoListProto.TextRuns value) { mSubtitle = value; return this; }
+        public AccountTabLink setRawNavigation(byte[] value) { mRawNavigation = value; return this; }
+        public AccountTabLink setRawTitle(byte[] value) { mRawTitle = value; return this; }
 
         @Override
         public void writeTo(ProtoWriter writer) {
             if (mIconData != null) writer.writeMessage(1, mIconData);
             if (mImage != null) writer.writeMessage(2, mImage);
             for (int i = 0; i < mText.size(); i++) writer.writeMessage(3, mText.get(i));
+            if (mRawTitle != null) writer.writeBytes(3, mRawTitle);
             if (mNavigation != null) writer.writeMessage(4, mNavigation);
+            else if (mRawNavigation != null) writer.writeBytes(4, mRawNavigation);
+            if (mSubtitle != null) writer.writeMessage(13, mSubtitle);
         }
 
         @Override
@@ -2384,10 +2396,14 @@ public final class VideoListProto {
                 public Image setPicture(VideoListProto.Thumbnails value) { mPicture = value; return this; }
                 public VideoListProto.Thumbnails getPicture() { return mPicture; }
                 public boolean hasPicture() { return mPicture != null; }
+                // Hand-added: backstageImageRenderer (abut) field 4, the endpoint run on a tap.
+                private ProtoMessage mEndpoint;
+                public Image setEndpoint(ProtoMessage value) { mEndpoint = value; return this; }
 
                 @Override
                 public void writeTo(ProtoWriter writer) {
                     if (mPicture != null) writer.writeMessage(1, mPicture);
+                    if (mEndpoint != null) writer.writeMessage(4, mEndpoint);
                 }
 
                 @Override
@@ -2487,6 +2503,25 @@ public final class VideoListProto {
             // Field 28 is not drawn by the comment view the apps use for posts; 5 is the line
             // under the author, so the time and counts go there.
             if (mPublishedTime != null) writer.writeMessage(5, mPublishedTime);
+            for (int i = 0; i < mRawFields.size(); i++) {
+                Object value = mRawFields.get(i)[1];
+                if (value instanceof Boolean) writer.writeBool((Integer) mRawFields.get(i)[0], (Boolean) value);
+                else writer.writeBytes((Integer) mRawFields.get(i)[0], (byte[]) value);
+            }
+        }
+
+        /** Field 54 (acey.y): a tap on the attached picture opens the app's image viewer. */
+        public CommunityPostRenderer setImageViewer(boolean value) {
+            if (value) mRawFields.add(new Object[]{54, Boolean.TRUE});
+            return this;
+        }
+
+        // Hand-added: fields of commentRenderer (acey) given as raw bytes - 8 the menu, 10 the
+        // action buttons (like, dislike, reply), 28 the like count shown next to them.
+        private final java.util.List<Object[]> mRawFields = new java.util.ArrayList<Object[]>();
+        public CommunityPostRenderer addRawField(int field, byte[] value) {
+            mRawFields.add(new Object[]{field, value});
+            return this;
         }
 
         @Override
@@ -2746,6 +2781,9 @@ public final class VideoListProto {
         public java.util.List<VideoListProto.ItemSectionRenderer.IcsContents> getIcsContentList() { return mIcsContent; }
         public int getIcsContentCount() { return mIcsContent.size(); }
         public VideoListProto.ItemSectionRenderer.IcsContents getIcsContent(int index) { return mIcsContent.get(index); }
+        /** Field 5, the header (union adpa): e.g. the "Sort by" header of SortMenuProto.header(). */
+        private ProtoMessage mHeader;
+        public ItemSectionRenderer setHeader(ProtoMessage value) { mHeader = value; return this; }
         public ItemSectionRenderer addNext(VideoListProto.NextRequest value) {
             if (value == null) throw new NullPointerException("next");
             mNext.add(value);
@@ -2759,6 +2797,7 @@ public final class VideoListProto {
         public void writeTo(ProtoWriter writer) {
             for (int i = 0; i < mIcsContent.size(); i++) writer.writeMessage(1, mIcsContent.get(i));
             for (int i = 0; i < mNext.size(); i++) writer.writeMessage(2, mNext.get(i));
+            if (mHeader != null) writer.writeMessage(5, mHeader);
         }
 
         @Override
@@ -3146,6 +3185,9 @@ public final class VideoListProto {
                                 public java.util.List<VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer.ContentEntry.ContentData.ContentActualData> getCList() { return mC; }
                                 public int getCCount() { return mC.size(); }
                                 public VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer.ContentEntry.ContentData.ContentActualData getC(int index) { return mC.get(index); }
+                                /** Field 5, subMenu: the channel bar over the Subscriptions feed (see ChannelBarProto). */
+                                private ProtoMessage mSubMenu;
+                                public ContentData setSubMenu(ProtoMessage value) { mSubMenu = value; return this; }
                                 public ContentData addLoadCommand(VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer.ContentEntry.ContentData.LoadData value) {
                                     if (value == null) throw new NullPointerException("loadCommand");
                                     mLoadCommand.add(value);
@@ -3159,6 +3201,7 @@ public final class VideoListProto {
                                 public void writeTo(ProtoWriter writer) {
                                     for (int i = 0; i < mC.size(); i++) writer.writeMessage(1, mC.get(i));
                                     for (int i = 0; i < mLoadCommand.size(); i++) writer.writeMessage(2, mLoadCommand.get(i));
+                                    if (mSubMenu != null) writer.writeMessage(5, mSubMenu);
                                 }
 
                                 @Override

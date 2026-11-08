@@ -55,16 +55,20 @@ public class LoginActivity extends Activity {
         public void run() {
             String datasync = "";
             String name = "";
+            String email = "";
             try {
                 Config config = Config.get(activity);
                 JSONObject menu = InnertubeEndpoint.request("account/account_menu",
                         InnertubeEndpoint.context(config), config);
                 datasync = find(menu, "datasyncId");
                 name = find(menu, "accountName");
+                email = find(menu, "email");
+                if (email.isEmpty()) email = emailLike(menu);
+                if (email.isEmpty()) email = listAccountsEmail();
             } catch (Exception e) {
                 android.util.Log.w("Login", "account menu failed: " + e);
             }
-            YouTubeAuth.saveAccount(datasync, name);
+            YouTubeAuth.saveAccount(datasync, name, email);
             activity.runOnUiThread(new Done(activity, name));
         }
     }
@@ -123,6 +127,63 @@ public class LoginActivity extends Activity {
         return a + "; " + b;
     }
 
+    /**
+     * The signed-in email from Google's ListAccounts, which the session cookies alone unlock.
+     * Returns the first "x@y.z" in the answer, or "" if the call fails.
+     */
+    private static String listAccountsEmail() {
+        String cookies = YouTubeAuth.cookieHeader();
+        if (cookies.isEmpty()) return "";
+        java.net.HttpURLConnection c = null;
+        try {
+            java.net.URL url = new java.net.URL(
+                    "https://accounts.google.com/ListAccounts?listPages=0&json=standard");
+            c = (java.net.HttpURLConnection) url.openConnection();
+            c.setConnectTimeout(5000);
+            c.setReadTimeout(7000);
+            c.setRequestProperty("Cookie", cookies);
+            java.util.Scanner scanner = new java.util.Scanner(c.getInputStream(), "UTF-8");
+            scanner.useDelimiter("\\A");
+            String body = scanner.hasNext() ? scanner.next() : "";
+            scanner.close();
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("[\\w.+-]+@[\\w.-]+\\.[A-Za-z]{2,}").matcher(body);
+            if (m.find()) return m.group();
+        } catch (Exception e) {
+            android.util.Log.w("Login", "ListAccounts failed: " + e);
+        } finally {
+            if (c != null) c.disconnect();
+        }
+        return "";
+    }
+
+    /** First string value anywhere that looks like an email ("x@y.z", no spaces). */
+    private static String emailLike(Object node) {
+        if (node instanceof String) {
+            String s = (String) node;
+            int at = s.indexOf('@');
+            if (at > 0 && s.indexOf(' ') < 0 && s.indexOf('.', at) > at) return s;
+            return "";
+        }
+        if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) {
+                for (int i = 0; names.hasNext(); i++) {
+                    String found = emailLike(object.opt(names.next()));
+                    if (!found.isEmpty()) return found;
+                }
+            }
+        } else if (node instanceof org.json.JSONArray) {
+            org.json.JSONArray array = (org.json.JSONArray) node;
+            for (int i = 0; i < array.length(); i++) {
+                String found = emailLike(array.opt(i));
+                if (!found.isEmpty()) return found;
+            }
+        }
+        return "";
+    }
+
     /** The first value of a key anywhere in the answer, as text (simpleText for a text object). */
     private static String find(Object node, String key) {
         if (node instanceof JSONObject) {
@@ -137,10 +198,10 @@ public class LoginActivity extends Activity {
                 }
                 if (!simple.isEmpty()) return simple;
             }
-            org.json.JSONArray names = object.names();
+            java.util.Iterator<String> names = object.keys();
             if (names != null) {
-                for (int i = 0; i < names.length(); i++) {
-                    String found = find(object.opt(names.optString(i)), key);
+                for (int i = 0; names.hasNext(); i++) {
+                    String found = find(object.opt(names.next()), key);
                     if (!found.isEmpty()) return found;
                 }
             }

@@ -29,6 +29,7 @@ final class YouTubeAuth {
     private static volatile String sapisid = "";
     private static volatile String datasyncId = "";
     private static volatile String accountName = "";
+    private static volatile String accountEmail = "";
 
     private YouTubeAuth() { }
 
@@ -40,14 +41,61 @@ final class YouTubeAuth {
         sapisid = prefs.getString("sapisid", "");
         datasyncId = prefs.getString("datasync", "");
         accountName = prefs.getString("name", "");
+        accountEmail = prefs.getString("email", "");
+    }
+
+    /**
+     * Set for the request being answered when the app itself is signed out (it sent no token):
+     * then nothing in that answer may come from the account, even though the proxy holds one.
+     */
+    private static final ThreadLocal<Boolean> ANONYMOUS = new ThreadLocal<Boolean>();
+
+    static void setAnonymous(boolean anonymous) {
+        if (anonymous) ANONYMOUS.set(Boolean.TRUE); else ANONYMOUS.remove();
     }
 
     static boolean signedIn() {
+        if (Boolean.TRUE.equals(ANONYMOUS.get())) return false;
         return !sapisid.isEmpty() && !cookieHeader.isEmpty();
     }
 
     static String accountName() {
         return accountName;
+    }
+
+    /** DATASYNC_ID of the signed-in account, the identity token the account switcher selects by. */
+    static String datasyncId() {
+        return datasyncId;
+    }
+
+    private static volatile String accountPhoto;
+
+    /** The account's picture (youtube.com's accountPhoto), "" when not known yet. */
+    static String accountPhoto() {
+        if (accountPhoto == null) accountPhoto = prefs == null ? "" : prefs.getString("photo", "");
+        return accountPhoto;
+    }
+
+    static synchronized void savePhoto(String url) {
+        accountPhoto = url == null ? "" : url;
+        if (prefs != null) prefs.edit().putString("photo", accountPhoto).commit();
+    }
+
+    /** The email as saved, "" when it was never learned. */
+    static String storedEmail() {
+        return accountEmail;
+    }
+
+    static synchronized void saveEmail(String email) {
+        accountEmail = email == null ? "" : email;
+        if (prefs != null) prefs.edit().putString("email", accountEmail).commit();
+    }
+
+    /** The account's email, for the synthetic account the apps list; a fallback when unknown. */
+    static String accountEmail() {
+        if (!accountEmail.isEmpty()) return accountEmail;
+        if (accountName.contains("@")) return accountName;
+        return "me@youtube.local";
     }
 
     /**
@@ -82,10 +130,12 @@ final class YouTubeAuth {
         return true;
     }
 
-    static synchronized void saveAccount(String datasync, String name) {
+    static synchronized void saveAccount(String datasync, String name, String email) {
         datasyncId = datasync == null ? "" : datasync;
         accountName = name == null ? "" : name;
-        prefs.edit().putString("datasync", datasyncId).putString("name", accountName).commit();
+        accountEmail = email == null ? "" : email;
+        prefs.edit().putString("datasync", datasyncId).putString("name", accountName)
+                .putString("email", accountEmail).commit();
     }
 
     static synchronized void signOut() {
@@ -93,7 +143,23 @@ final class YouTubeAuth {
         sapisid = "";
         datasyncId = "";
         accountName = "";
+        accountEmail = "";
+        accountPhoto = "";
+        ownChannel = "";
         if (prefs != null) prefs.edit().clear().commit();
+    }
+
+    private static volatile String ownChannel;
+
+    /** The account's own channel id (UC...), "" when not known yet. */
+    static String ownChannel() {
+        if (ownChannel == null) ownChannel = prefs == null ? "" : prefs.getString("channel", "");
+        return ownChannel;
+    }
+
+    static synchronized void saveOwnChannel(String channelId) {
+        ownChannel = channelId == null ? "" : channelId;
+        if (prefs != null) prefs.edit().putString("channel", ownChannel).commit();
     }
 
     /**

@@ -4,6 +4,7 @@ import android.content.Context;
 import com.viitube.proxy.proto.AndroidNextRequestProto;
 import com.viitube.proxy.proto.AndroidSearchRequestProto;
 import com.viitube.proxy.proto.BareAndroidRequestProto;
+import com.viitube.proxy.proto.ProtoWriter;
 import fi.iki.elonen.NanoHTTPD;
 import org.json.JSONObject;
 
@@ -42,15 +43,31 @@ public class YoutubeiEndpoint implements Endpoint {
         this.mode = mode;
     }
 
+    /** Apps from this version on can sign in themselves (see LoginActivity / the patched v12). */
+    private static final int SIGN_IN_VERSION = 12;
+
     @Override
     public NanoHTTPD.Response handle(NanoHTTPD.IHTTPSession session, String[] params,
                                      Config config, Context context) throws Exception {
-        // The language the proxy writes its own labels in, for this request's thread.
-        YoutubeiResponses.setLanguage(InnertubeEndpoint.hl(config));
         // Always read the body: NanoHTTPD would take unread bytes for the next request on a
         // kept-alive connection.
         byte[] body = readBody(session);
         String auth = session.getHeaders().get("authorization");
+        // An app that can sign in but sent no token is signed out: answer it without the account
+        // (home, related videos, subscribe buttons...), as YouTube would. Older apps cannot sign
+        // in at all, so they keep getting the proxy's account.
+        YouTubeAuth.setAnonymous(auth == null && guideVersion(body, session) >= SIGN_IN_VERSION);
+        try {
+            return handle(session, body, auth, config, context);
+        } finally {
+            YouTubeAuth.setAnonymous(false);
+        }
+    }
+
+    private NanoHTTPD.Response handle(NanoHTTPD.IHTTPSession session, byte[] body, String auth,
+                                      Config config, Context context) throws Exception {
+        // The language the proxy writes its own labels in, for this request's thread.
+        YoutubeiResponses.setLanguage(InnertubeEndpoint.hl(config));
         android.util.Log.i(TAG, "req " + mode + " " + session.getUri()
                 + (auth == null ? " (no auth)" : auth.toLowerCase(java.util.Locale.US).startsWith("bearer")
                         ? " (Bearer len " + auth.length() + ")" : " (" + auth.split(" ")[0] + ")"));
@@ -69,10 +86,30 @@ public class YoutubeiEndpoint implements Endpoint {
             return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "text/plain",
                     "id=" + randomId(40));
         }
-        if ("guide".equals(mode)) return protobuf(YoutubeiResponses.guide(guideVersion(body, session)));
+        if ("accounts_list".equals(mode)) return accountsList(session, body, config);
+        if ("guide".equals(mode)) {
+            int version = guideVersion(body, session);
+            byte[] guide = YoutubeiResponses.guide(version);
+            // A signed-in v12 gets the top bar youtube.com sent it: camera and the account avatar.
+            if (auth != null && version >= SIGN_IN_VERSION && YouTubeAuth.signedIn()) {
+                ProtoWriter out = new ProtoWriter();
+                out.writeBytes(4, bytesField(MOBILE_TOPBAR_RENDERER, topbar(config)));  // adjb.items
+                byte[] extra = out.toByteArray();
+                byte[] joined = new byte[guide.length + extra.length];
+                System.arraycopy(guide, 0, joined, 0, guide.length);
+                System.arraycopy(extra, 0, joined, guide.length, extra.length);
+                guide = joined;
+            }
+            return protobuf(guide);
+        }
         if ("unknown".equals(mode)) {
             // A /youtubei/v1 endpoint this proxy does not serve (liking, subscribing, uploading).
             // An empty message leaves that part of the screen empty; a 404 or a 400 shows an error.
+            String path = session.getUri().substring(session.getUri().indexOf("/v1/") + 4);
+            // The apps drop a zero-length answer without calling back (the like button would never
+            // turn on), so these get a message with one field the app does not know and skips.
+            byte[] action = AccountActions.answer(path, body, config);
+            if (action != null) return protobuf(action);
             android.util.Log.i(TAG, "No answer for " + session.getUri() + " (" + body.length + " bytes)");
             return protobuf(new byte[0]);
         }
@@ -96,6 +133,265 @@ public class YoutubeiEndpoint implements Endpoint {
         return protobuf(new byte[0]);
     }
 
+    // The account switcher's response (account/accounts_list), with its renderer field numbers read
+    // from the decompiled 12.45.56 app (protobuf-nano, so every number is in the smali):
+    //   GetAccountsListResponse ablp { contents = 3 (repeated) }
+    //   ablq (one entry) { accountSectionListRenderer = ext 77108254 }
+    //   ablf accountSectionListRenderer { contents = 1 (repeated) }
+    //   abli (one item) { accountItemRenderer = ext 63434476 }
+    //   ablc accountItemRenderer { accountName = 5 (FormattedString) }
+    //   addp FormattedString { simpleText = 4 (string) }
+    private static final int ACCOUNT_SECTION_LIST_RENDERER = 77108254;
+    private static final int ACCOUNT_ITEM_RENDERER = 63434476;
+    private static final int ACCOUNT_ITEM = 62381864;                 // Lable -> Labkz
+    private static final int SELECT_ACTIVE_IDENTITY_ENDPOINT = 77196420; // acdz.cv -> afdl
+    private static final int DATASYNC_ID_TOKEN = 77196997;            // Lablv.a -> Laehq (identity id)
+    private static final int ACCOUNT_NAME_TOKEN = 77208462;           // Lablv.c -> Labps (account name)
+    private static final int DATA_SYNC_ID_TOKEN = 153880528;          // Lablv.f -> Lacuf (dataSyncId)
+    private static final String DEFAULT_AVATAR =
+            "https://www.gstatic.com/images/branding/product/1x/avatar_square_grey_48dp.png";
+
+    /**
+     * The account switcher's list. The app reaches signed-in state once this names an account; the
+     * proxy builds it from the web session it holds ({@link YouTubeAuth}), since Google will not
+     * mint the resigned app a real token to fetch it with. The account item (Labkz) carries the
+     * display name (field 4), a photo (field 6) and isSelected=true (field 7), so the app shows it
+     * as the active, signed-in account.
+     */
+    private NanoHTTPD.Response accountsList(NanoHTTPD.IHTTPSession session, byte[] body,
+                                            Config config) {
+        if (!YouTubeAuth.signedIn()) return protobuf(new byte[0]);
+        String email = signedInEmail(config);
+        String name = YouTubeAuth.accountName();
+        if (name.isEmpty()) name = email;
+
+        ProtoWriter photo = new ProtoWriter();               // afov ThumbnailDetails
+        String picture = YouTubeAuth.accountPhoto();
+        photo.writeBytes(1, thumbnail(picture.isEmpty() ? DEFAULT_AVATAR
+                : YoutubeiResponses.largeAvatar(picture), 240, 240));
+
+        // selectActiveIdentityEndpoint, carrying the account's DATASYNC_ID. The switcher needs it:
+        // its model (txw) builds the identity from this endpoint, and dropping it leaves the list
+        // empty (so the switcher spins). acdz.cv -> afdl.a[0] -> Lablv -> Laehq{1: datasyncId}.
+        String datasync = YouTubeAuth.datasyncId();
+        if (datasync.isEmpty()) datasync = "proxy";
+        // afdl.a is a list of single-token unions (Lablv); the app's identity (ppj) takes its id
+        // from Laehq, its account name from Labps - which must be the Android account's name, so
+        // the app finds that account for the token - and its dataSyncId from Lacuf.
+        ProtoWriter identity = new ProtoWriter();            // afdl selectActiveIdentityEndpoint
+        identity.writeBytes(1, bytesField(DATASYNC_ID_TOKEN, stringMessage(datasync)));
+        identity.writeBytes(1, bytesField(ACCOUNT_NAME_TOKEN, stringMessage(email)));
+        identity.writeBytes(1, bytesField(DATA_SYNC_ID_TOKEN, stringMessage(datasync)));
+        byte[] endpoint = bytesField(SELECT_ACTIVE_IDENTITY_ENDPOINT, identity.toByteArray());  // acdz
+
+        ProtoWriter account = new ProtoWriter();             // Labkz account item
+        account.writeBytes(4, formattedString(name));        // a: accountName (addp)
+        account.writeBytes(6, photo.toByteArray());
+        account.writeBool(7, true);                          // d: isSelected
+        account.writeBool(8, true);                          // m: hasChannel
+        account.writeBool(10, false);                        // n: isDisabled
+        account.writeBytes(12, endpoint);                    // f: NavigationEndpoint
+        byte[] accountUnion = bytesField(ACCOUNT_ITEM, account.toByteArray());  // Lable
+
+        ProtoWriter item = new ProtoWriter();                // ablc accountItemRenderer
+        item.writeBytes(1, accountUnion);
+        item.writeBytes(5, formattedString(name));
+
+        byte[] itemUnion = bytesField(ACCOUNT_ITEM_RENDERER, item.toByteArray());  // abli
+        byte[] section = bytesField(1, itemUnion);                                 // ablf
+        byte[] sectionUnion = bytesField(ACCOUNT_SECTION_LIST_RENDERER, section);  // ablq
+        return protobuf(bytesField(3, sectionUnion));                              // ablp contents
+    }
+
+    /** A message whose only field is the string at field 1 (the identity tokens). */
+    private static byte[] stringMessage(String value) {
+        ProtoWriter writer = new ProtoWriter();
+        writer.writeString(1, value);
+        return writer.toByteArray();
+    }
+
+    /**
+     * The Google account's email. The sign-in page leaves no email behind, so it is read once from
+     * the web client's account/accounts_list (signed with the session) and kept.
+     */
+    private static String signedInEmail(Config config) {
+        String email = YouTubeAuth.storedEmail();
+        if (!email.isEmpty() && !YouTubeAuth.accountPhoto().isEmpty()) return email;
+        try {
+            JSONObject answer = InnertubeEndpoint.request("account/accounts_list",
+                    InnertubeEndpoint.context(config), config);
+            java.util.regex.Matcher photo = java.util.regex.Pattern
+                    .compile("\"accountPhoto\":\\{\"thumbnails\":\\[\\{\"url\":\"([^\"]+)\"")
+                    .matcher(answer.toString());
+            if (photo.find()) YouTubeAuth.savePhoto(photo.group(1).replace("\\/", "/"));
+            if (!email.isEmpty()) return email;
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("[\\w.+-]+@[\\w.-]+\\.[A-Za-z]{2,}").matcher(answer.toString());
+            if (m.find()) {
+                YouTubeAuth.saveEmail(m.group());
+                return m.group();
+            }
+            android.util.Log.w(TAG, "accounts_list has no email");
+        } catch (Exception e) {
+            android.util.Log.w(TAG, "email lookup failed: " + e);
+        }
+        return YouTubeAuth.accountEmail();
+    }
+
+    /** addp FormattedString with one run: {runs = 1 {text = 1}}. */
+    private static byte[] formattedString(String text) {
+        ProtoWriter run = new ProtoWriter();
+        run.writeString(1, text);
+        return bytesField(1, run.toByteArray());
+    }
+
+    /** afov thumbnail entry: {url = 1, width = 2, height = 3}. */
+    private static byte[] thumbnail(String url, int width, int height) {
+        ProtoWriter writer = new ProtoWriter();
+        writer.writeString(1, url);
+        writer.writeInt32(2, width);
+        writer.writeInt32(3, height);
+        return writer.toByteArray();
+    }
+
+    /** One length-delimited field: tag (field, wire 2), length, value. */
+    private static byte[] bytesField(int field, byte[] value) {
+        ProtoWriter writer = new ProtoWriter();
+        writer.writeBytes(field, value);
+        return writer.toByteArray();
+    }
+
+    // The top bar of a signed-in 12.45.56 comes from the guide response (adjb): one of its items
+    // (adjc, field 4) carries mobileTopbarRenderer aedl {title = 1, buttons = 4}. Each button
+    // (aedk) is a buttonRenderer abxa (ext 65153809: icon = 8 {iconType = 1}, navigationEndpoint
+    // = 9, accessibility = 10 {label = 1}) or the account avatar afqs (ext 120823052: avatar = 2
+    // thumbnails, menu = 3). The avatar opens a multiPageMenuRenderer aeen (aeer ext 120770929):
+    // header = 1 (aeem ext 77195710 -> activeAccountHeaderRenderer ablu {name = 1, photo = 2,
+    // email lines = 7}), sections = 2 (aeeq ext 122175950 -> aeep {items = 1 (aeeo ext 79129962 ->
+    // compactLinkRenderer acgl {icon = 1, title = 3, navigationEndpoint = 4})}).
+    private static final int MOBILE_TOPBAR_RENDERER = 123267149;
+    private static final int TOPBAR_BUTTON = 65153809;
+    private static final int TOPBAR_AVATAR = 120823052;
+    private static final int MULTI_PAGE_MENU = 120770929;
+    private static final int ACTIVE_ACCOUNT_HEADER = 77195710;
+    private static final int MENU_SECTION = 122175950;
+    private static final int COMPACT_LINK = 79129962;
+    // NavigationEndpoint (acdz) fields the menu uses; each has a handler in the app (cdv's map).
+    private static final int UPLOAD_ENDPOINT = 63555155;      // afur: the system's video picker
+    private static final int SETTINGS_ENDPOINT = 50078082;    // absm: SettingsActivity
+    private static final int SIGN_OUT_ENDPOINT = 54240896;    // afie: signs the app out
+    private static final int SIGN_IN_ENDPOINT = 49706687;     // afic: the account picker
+    private static final int BROWSE_ENDPOINT = 48687626;      // abwg {browseId = 2}
+    // IconType values, from the app's icon table (gsu).
+    private static final int SEARCH_ENDPOINT = 48687709;      // afcn: empty query = search box
+    private static final int ICON_VIDEO_CAMERA = 141;
+    private static final int ICON_SEARCH = 60;
+    private static final int ICON_ACCOUNT_BOX = 258;
+    private static final int ICON_SWITCH_ACCOUNT = 182;
+    private static final int ICON_SETTINGS = 44;
+    private static final int ICON_EXIT = 381;
+
+    private static byte[] topbar(Config config) {
+        ProtoWriter camera = new ProtoWriter();                      // abxa buttonRenderer
+        camera.writeBytes(8, icon(ICON_VIDEO_CAMERA));
+        camera.writeBytes(9, bytesField(UPLOAD_ENDPOINT, new byte[0]));
+        camera.writeBytes(10, stringMessage(YoutubeiResponses.tr("Upload")));
+
+        String email = signedInEmail(config);
+        String name = YouTubeAuth.accountName();
+        if (name.isEmpty()) name = email;
+        String picture = YouTubeAuth.accountPhoto();
+        ProtoWriter photo = new ProtoWriter();                       // afov
+        photo.writeBytes(1, thumbnail(picture.isEmpty() ? DEFAULT_AVATAR
+                : YoutubeiResponses.largeAvatar(picture), 240, 240));
+
+        ProtoWriter header = new ProtoWriter();                      // ablu
+        header.writeBytes(1, formattedString(name));
+        header.writeBytes(2, photo.toByteArray());
+        header.writeBytes(7, formattedString(email));
+
+        ProtoWriter section = new ProtoWriter();                     // aeep
+        String channel = ownChannel(config);
+        if (!channel.isEmpty()) {
+            ProtoWriter browse = new ProtoWriter();                  // abwg
+            browse.writeString(2, channel);
+            section.writeBytes(1, bytesField(COMPACT_LINK, menuLink(ICON_ACCOUNT_BOX,
+                    YoutubeiResponses.tr("My channel"), bytesField(BROWSE_ENDPOINT, browse.toByteArray()))));
+        }
+        section.writeBytes(1, bytesField(COMPACT_LINK, menuLink(ICON_SWITCH_ACCOUNT,
+                YoutubeiResponses.tr("Switch account"), bytesField(SIGN_IN_ENDPOINT, new byte[0]))));
+        section.writeBytes(1, bytesField(COMPACT_LINK, menuLink(ICON_SETTINGS,
+                YoutubeiResponses.tr("Settings"), bytesField(SETTINGS_ENDPOINT, new byte[0]))));
+        section.writeBytes(1, bytesField(COMPACT_LINK, menuLink(ICON_EXIT,
+                YoutubeiResponses.tr("Sign out"), bytesField(SIGN_OUT_ENDPOINT, new byte[0]))));
+
+        ProtoWriter menu = new ProtoWriter();                        // aeen
+        menu.writeBytes(1, bytesField(ACTIVE_ACCOUNT_HEADER, header.toByteArray()));
+        menu.writeBytes(2, bytesField(MENU_SECTION, section.toByteArray()));
+
+        ProtoWriter avatar = new ProtoWriter();                      // afqs
+        avatar.writeBytes(2, photo.toByteArray());
+        avatar.writeBytes(3, bytesField(MULTI_PAGE_MENU, menu.toByteArray()));
+
+        ProtoWriter bar = new ProtoWriter();                         // aedl
+        // Search, as the app expects it here: a button with an empty searchEndpoint (afcn), which
+        // opens the search box; with the avatar shown the menu's own search item goes away.
+        ProtoWriter search = new ProtoWriter();                      // abxa
+        search.writeBytes(8, icon(ICON_SEARCH));
+        search.writeBytes(9, bytesField(SEARCH_ENDPOINT, new byte[0]));
+        search.writeBytes(10, stringMessage(YoutubeiResponses.tr("Search")));
+
+        bar.writeBytes(4, bytesField(TOPBAR_BUTTON, camera.toByteArray()));
+        bar.writeBytes(4, bytesField(TOPBAR_BUTTON, search.toByteArray()));
+        bar.writeBytes(4, bytesField(TOPBAR_AVATAR, avatar.toByteArray()));
+        return bar.toByteArray();
+    }
+
+    /** compactLinkRenderer acgl: icon = 1, title = 3, navigationEndpoint = 4. */
+    private static byte[] menuLink(int iconType, String title, byte[] endpoint) {
+        ProtoWriter link = new ProtoWriter();
+        link.writeBytes(1, icon(iconType));
+        link.writeBytes(3, formattedString(title));
+        link.writeBytes(4, endpoint);
+        return link.toByteArray();
+    }
+
+    /** Icon adkz {iconType = 1}. */
+    private static byte[] icon(int iconType) {
+        ProtoWriter writer = new ProtoWriter();
+        writer.writeInt32(1, iconType);
+        return writer.toByteArray();
+    }
+
+    /**
+     * The account's own channel id: its handle from youtube.com's account list, resolved once to
+     * the channel's id and kept.
+     */
+    private static String ownChannel(Config config) {
+        String channel = YouTubeAuth.ownChannel();
+        if (!channel.isEmpty()) return channel;
+        try {
+            JSONObject accounts = InnertubeEndpoint.request("account/accounts_list",
+                    InnertubeEndpoint.context(config), config);
+            java.util.regex.Matcher handle = java.util.regex.Pattern
+                    .compile("\"isSelected\":true.*?\"channelHandle\":\\{\"simpleText\":\"(@[^\"]+)\"")
+                    .matcher(accounts.toString());
+            if (!handle.find()) return "";
+            JSONObject resolved = InnertubeEndpoint.request("navigation/resolve_url",
+                    InnertubeEndpoint.context(config).put("url", "https://www.youtube.com/" + handle.group(1)),
+                    config);
+            java.util.regex.Matcher id = java.util.regex.Pattern
+                    .compile("\"browseId\":\"(UC[A-Za-z0-9_-]{22})\"").matcher(resolved.toString());
+            if (id.find()) {
+                YouTubeAuth.saveOwnChannel(id.group(1));
+                return id.group(1);
+            }
+        } catch (Exception e) {
+            android.util.Log.w(TAG, "own channel lookup failed: " + e);
+        }
+        return "";
+    }
+
     // ------------------------------------------------------------------ continuation tokens
 
     /**
@@ -106,7 +402,27 @@ public class YoutubeiEndpoint implements Endpoint {
     private static final String TOKEN_PREFIX = "vtp1|";
     private static final String SEARCH_TOKEN = "s";
     private static final String COMMENTS_TOKEN = "c";
+    /** The comments newest first, as the comments' sort menu chooses them. */
+    private static final String NEWEST_COMMENTS_TOKEN = "cn";
+    /** Top comments chosen in the sort menu (its pages after the first are "ci"). */
+    private static final String TOP_COMMENTS_SORT_TOKEN = "cs";
+    /** Top comments continued in their own section (apps from 12 on). */
+    private static final String SECTION_COMMENTS_TOKEN = "ci";
+
+    /** The reload tokens of the comments' sort menu: top comments, newest first. */
+    static String commentsSortToken(String videoId, boolean newest) {
+        return continuationToken(newest ? NEWEST_COMMENTS_TOKEN : TOP_COMMENTS_SORT_TOKEN, 0, videoId);
+    }
     private static final String UPLOADS_TOKEN = "u";
+    /** The Videos tab sorted by popularity and oldest first (ChannelEndpoint.SORT_*). */
+    private static final String POPULAR_TOKEN = "up";
+    private static final String OLDEST_TOKEN = "uo";
+
+    /** The reload token of a "Sort by" choice: 0 newest, 1 most popular, 2 oldest. */
+    static String sortToken(int sort, String channelId) {
+        return continuationToken(sort == 1 ? POPULAR_TOKEN : sort == 2 ? OLDEST_TOKEN : UPLOADS_TOKEN,
+                0, channelId);
+    }
     /** The Community tab and the Playlists tab of a channel load further pages too. */
     private static final String COMMUNITY_TOKEN = "p";
     private static final String PLAYLISTS_TOKEN = "l";
@@ -289,19 +605,23 @@ public class YoutubeiEndpoint implements Endpoint {
             List<InnertubeEndpoint.Video> videos = InnertubeEndpoint.accountFeed("FEsubscriptions", 40, config);
             if (!videos.isEmpty()) {
                 boolean feedCards = version >= YoutubeiResponses.PIVOT_BAR_VERSION;
+                List<String[]> channelBar = InnertubeEndpoint.subscribedChannels(config);
                 byte[] answer = YoutubeiResponses.videoList("FEsubscriptions", "Subscriptions", videos, now,
-                        feedCards, feedCards ? feedAvatars(videos, config) : NO_AVATARS);
+                        feedCards, feedCards ? feedAvatars(videos, config) : NO_AVATARS, channelBar);
                 store(context, key, answer);
                 return protobuf(answer);
             }
         }
         if (id.startsWith("FEsubscriptions")) return protobuf(YoutubeiResponses.subscriptions());
-        if (id.startsWith("FElibrary")) return protobuf(YoutubeiResponses.library());
+        if (id.startsWith("FElibrary")) {
+            return protobuf(YoutubeiResponses.library(InnertubeEndpoint.accountPlaylists(config)));
+        }
         if (id.startsWith("FEaccount")) return protobuf(YoutubeiResponses.account());
         if (id.startsWith("VL")) {
             String playlistId = id.substring(2);
             if (!playlistId.matches("[A-Za-z0-9_-]+")) return protobuf(new byte[0]);
-            String key = "playlist_" + playlistId;
+            // Watch later, Liked videos and private playlists only exist for the account.
+            String key = "playlist_" + playlistId + (YouTubeAuth.signedIn() ? "_a" : "");
             byte[] cached = cached(context, key, 15L * 60 * 1000);
             if (cached != null) return protobuf(cached);
             PlaylistEndpoint.Playlist playlist = PlaylistEndpoint.fetchPlaylist(playlistId, 100, config);
@@ -315,10 +635,41 @@ public class YoutubeiEndpoint implements Endpoint {
                 android.util.Log.i(TAG, "Unknown channel " + id);
                 return protobuf(new byte[0]);
             }
-            return protobuf(channel(channelId, config, context, now, version));
+            String params = request.getParams();
+            int sort = -1;
+            if (params.startsWith(YoutubeiResponses.SORT_PARAMS)) {
+                try {
+                    sort = Integer.parseInt(params.substring(YoutubeiResponses.SORT_PARAMS.length()));
+                } catch (NumberFormatException e) {
+                    sort = -1;
+                }
+            }
+            return protobuf(channel(channelId, config, context, now, version, sort));
         }
         android.util.Log.i(TAG, "No answer for browse id " + id);
         return protobuf(new byte[0]);
+    }
+
+    /** A page of the Videos tab sorted by popularity or oldest first. */
+    private NanoHTTPD.Response sortedUploadsPage(String channelId, String kind, int offset, Config config,
+                                                 Context context) throws Exception {
+        int sort = POPULAR_TOKEN.equals(kind) ? ChannelEndpoint.SORT_POPULAR : ChannelEndpoint.SORT_OLDEST;
+        String key = "uploads_" + kind + "_" + channelId + "_" + offset;
+        byte[] cached = cached(context, key, 30L * 60 * 1000);
+        if (cached != null) return protobuf(cached);
+        ChannelEndpoint.Uploads uploads = ChannelEndpoint.loadSortedUploads(channelId, sort,
+                offset + PAGE_SIZE, config);
+        List<InnertubeEndpoint.Video> page = slice(uploads.videos, offset, PAGE_SIZE);
+        boolean more = uploads.hasMore || uploads.videos.size() > offset + page.size();
+        String next = nextToken(kind, offset, page.size(), more, channelId);
+        String avatar;
+        synchronized (AVATARS) {
+            avatar = AVATARS.get(channelId);
+        }
+        byte[] answer = YoutubeiResponses.browseVideosContinuation(page, avatar, System.currentTimeMillis(),
+                next, null);
+        if (!page.isEmpty()) store(context, key, answer);
+        return protobuf(answer);
     }
 
     /**
@@ -337,6 +688,9 @@ public class YoutubeiEndpoint implements Endpoint {
         int offset = tokenOffset(parts);
         if (COMMUNITY_TOKEN.equals(parts[0])) return communityPage(channelId, offset, config, context);
         if (PLAYLISTS_TOKEN.equals(parts[0])) return playlistsPage(channelId, offset, config, context);
+        if (POPULAR_TOKEN.equals(parts[0]) || OLDEST_TOKEN.equals(parts[0])) {
+            return sortedUploadsPage(channelId, parts[0], offset, config, context);
+        }
         if (!UPLOADS_TOKEN.equals(parts[0])) {
             android.util.Log.i(TAG, "No answer for this continuation");
             return protobuf(new byte[0]);
@@ -357,8 +711,10 @@ public class YoutubeiEndpoint implements Endpoint {
         synchronized (AVATARS) {
             avatar = AVATARS.get(channelId);
         }
+        // Offset 0 only comes back as the "Sort by" menu's newest-first choice: the reloaded list
+        // carries the menu again, with that choice ticked.
         byte[] answer = YoutubeiResponses.browseVideosContinuation(page, avatar,
-                System.currentTimeMillis(), next);
+                System.currentTimeMillis(), next, null);
         if (!page.isEmpty()) store(context, key, answer);
         if (!next.isEmpty()) {
             PREFETCHERS.execute(new UploadsPrefetch(channelId, offset + 2 * PAGE_SIZE, config));
@@ -695,8 +1051,17 @@ public class YoutubeiEndpoint implements Endpoint {
     /** Channel page; the header, uploads and playlists are three requests made in parallel. */
     private static byte[] channel(String channelId, Config config, Context context, long now,
                                   int clientMajorVersion) throws Exception {
+        return channel(channelId, config, context, now, clientMajorVersion, -1);
+    }
+
+    /** {@code sort} -1: the channel as it opens; 0-2: with its Videos tab selected and sorted. */
+    private static byte[] channel(String channelId, Config config, Context context, long now,
+                                  int clientMajorVersion, int sort) throws Exception {
         boolean withCommunity = clientMajorVersion >= YoutubeiResponses.COMMUNITY_TAB_VERSION;
-        String key = "channel_" + channelId + (withCommunity ? "_c" : "");
+        AccountActions.refreshSubscriptions(config);
+        String key = "channel_" + channelId + (withCommunity ? "_c" : "")
+                + (sort >= 0 ? "_sort" + sort : "")
+                + (YouTubeAuth.signedIn() ? "_s" + AccountActions.subscriptionsVersion() : "");
         byte[] cached = cached(context, key, 30L * 60 * 1000);
         if (cached != null) return cached;
         Future<ChannelEndpoint.ChannelInfo> infoTask = LOADERS.submit(new ChannelInfoTask(channelId, config));
@@ -705,7 +1070,9 @@ public class YoutubeiEndpoint implements Endpoint {
         // The Community tab is one more request, made next to the others.
         Future<List<ChannelEndpoint.Post>> postsTask = withCommunity
                 ? LOADERS.submit(new CommunityTask(channelId, config)) : null;
-        ChannelEndpoint.Uploads uploads = ChannelEndpoint.loadUploads(channelId, CHANNEL_UPLOADS, config);
+        ChannelEndpoint.Uploads uploads = sort > 0
+                ? ChannelEndpoint.loadSortedUploads(channelId, sort, CHANNEL_UPLOADS, config)
+                : ChannelEndpoint.loadUploads(channelId, CHANNEL_UPLOADS, config);
 
         ChannelEndpoint.ChannelInfo info;
         try {
@@ -732,7 +1099,9 @@ public class YoutubeiEndpoint implements Endpoint {
         }
         // What the Videos tab loads when it is scrolled to the end.
         boolean more = uploads.hasMore || uploads.videos.size() >= CHANNEL_UPLOADS;
-        String uploadsToken = nextToken(UPLOADS_TOKEN, 0, uploads.videos.size(), more, channelId);
+        String uploadsToken = nextToken(sort == ChannelEndpoint.SORT_POPULAR ? POPULAR_TOKEN
+                : sort == ChannelEndpoint.SORT_OLDEST ? OLDEST_TOKEN : UPLOADS_TOKEN,
+                0, uploads.videos.size(), more, channelId);
         List<ChannelEndpoint.Post> posts = new ArrayList<ChannelEndpoint.Post>();
         if (postsTask != null) {
             try {
@@ -746,7 +1115,7 @@ public class YoutubeiEndpoint implements Endpoint {
         String playlistsToken = playlists.isEmpty() ? ""
                 : nextToken(PLAYLISTS_TOKEN, 0, playlists.size(), true, channelId);
         byte[] answer = YoutubeiResponses.channel(info, uploads.videos, playlists, now, uploadsToken,
-                posts, clientMajorVersion, communityToken, playlistsToken);
+                posts, clientMajorVersion, communityToken, playlistsToken, sort);
         if (!uploads.videos.isEmpty()) store(context, key, answer);
         return answer;
     }
@@ -761,7 +1130,8 @@ public class YoutubeiEndpoint implements Endpoint {
                 ? request.getContinuation() : request.getNextContinuation();
         if (!continuation.isEmpty()) {
             String[] token = parseToken(continuation);
-            if (token != null && COMMENTS_TOKEN.equals(token[0])) {
+            if (token != null && (COMMENTS_TOKEN.equals(token[0]) || NEWEST_COMMENTS_TOKEN.equals(token[0])
+                    || TOP_COMMENTS_SORT_TOKEN.equals(token[0]) || SECTION_COMMENTS_TOKEN.equals(token[0]))) {
                 return commentsContinuation(token, config, context);
             }
             return relatedContinuation(continuation, config, context);
@@ -789,6 +1159,11 @@ public class YoutubeiEndpoint implements Endpoint {
         String key = "next_" + videoId + (slim ? "_v12" : "") + (withComments ? "_c" : "")
                 + (version >= 14 ? "_v14" : "")
                 + (playlistId.isEmpty() ? "" : "_" + playlistId + "_" + playlistIndex);
+        // The subscribe button shows the account's real state, so the answer is per version of it.
+        AccountActions.refreshSubscriptions(config);
+        if (YouTubeAuth.signedIn()) {
+            key += "_s" + AccountActions.subscriptionsVersion() + "_r" + AccountActions.ratingsVersion();
+        }
         byte[] cached = cached(context, key, 10L * 60 * 1000);
         if (cached != null) return protobuf(cached);
         // Loaded next to the watch page, not after it, and only waited for briefly: a video
@@ -811,8 +1186,11 @@ public class YoutubeiEndpoint implements Endpoint {
         // the related videos went on loading those under the comments.
         String relatedToken = withComments ? ""
                 : nextToken(RELATED_TOKEN, 0, page.related.size(), true, videoId);
+        // From 12 on the comments continue in their own section, under a sort menu; the older
+        // apps continue them as the end of the watch page's list.
+        boolean sortable = version >= YoutubeiResponses.PIVOT_BAR_VERSION;
         String moreComments = !withComments ? ""
-                : continuationToken(COMMENTS_TOKEN, comments.size(), videoId);
+                : continuationToken(sortable ? SECTION_COMMENTS_TOKEN : COMMENTS_TOKEN, comments.size(), videoId);
         YoutubeiResponses.Queue queue = queue(videoId, playlistId, playlistIndex, config);
         byte[] answer = YoutubeiResponses.next(page, System.currentTimeMillis(), version,
                 relatedToken, moreComments, comments, queue);
@@ -868,26 +1246,39 @@ public class YoutubeiEndpoint implements Endpoint {
         String videoId = token[2];
         if (!InnertubeEndpoint.isValidVideoId(videoId)) return protobuf(new byte[0]);
         int offset = tokenOffset(token);
-        String key = "comments_" + videoId + "_" + offset;
+        boolean newest = NEWEST_COMMENTS_TOKEN.equals(token[0]);
+        String key = "comments_" + videoId + "_" + offset + "_" + token[0]
+                + (YouTubeAuth.signedIn() ? "_a" : "");
         byte[] cached = cached(context, key, 15L * 60 * 1000);
         if (cached != null) return protobuf(cached);
         android.util.Log.i(TAG, "comments of " + videoId + " from " + offset);
         List<InnertubeEndpoint.Comment> loaded = InnertubeEndpoint.comments(videoId,
-                offset + COMMENT_PAGE, config);
+                offset + COMMENT_PAGE, config, newest);
         List<InnertubeEndpoint.Comment> page = new ArrayList<InnertubeEndpoint.Comment>();
         for (int i = offset; i < loaded.size() && page.size() < COMMENT_PAGE; i++) {
             page.add(loaded.get(i));
         }
         // YouTube is asked, not the page that was just read: a page filled to the last comment
         // still has more behind it, and the list would otherwise end there.
-        boolean more = InnertubeEndpoint.hasMoreComments(videoId, offset + page.size());
-        String next = nextToken(COMMENTS_TOKEN, offset, page.size(), more, videoId);
-        byte[] answer = YoutubeiResponses.commentsContinuation(page, System.currentTimeMillis(), next);
+        boolean more = InnertubeEndpoint.hasMoreComments(videoId, offset + page.size(), newest);
+        boolean inSection = !COMMENTS_TOKEN.equals(token[0]);
+        String next = nextToken(newest ? NEWEST_COMMENTS_TOKEN
+                        : inSection ? SECTION_COMMENTS_TOKEN : COMMENTS_TOKEN,
+                offset, page.size(), more, videoId);
+        // The comments' own section continues with its own continuation; the first page of a sort
+        // choice replaces its contents and header.
+        boolean reload = offset == 0 && (NEWEST_COMMENTS_TOKEN.equals(token[0])
+                || TOP_COMMENTS_SORT_TOKEN.equals(token[0]));
+        byte[] answer = inSection
+                ? YoutubeiResponses.commentsSection(page, System.currentTimeMillis(), next,
+                        reload ? videoId : null, newest)
+                : YoutubeiResponses.commentsContinuation(page, System.currentTimeMillis(), next);
         if (!page.isEmpty()) store(context, key, answer);
         // The page after this one is read while this one is on screen, so the list does not stop
         // to wait for it when it is scrolled on.
         if (!next.isEmpty()) {
-            PREFETCHERS.execute(new CommentsPrefetch(videoId, offset + page.size() + COMMENT_PAGE, config));
+            PREFETCHERS.execute(new CommentsPrefetch(videoId, offset + page.size() + COMMENT_PAGE,
+                    newest, config));
         }
         return protobuf(answer);
     }
@@ -896,18 +1287,20 @@ public class YoutubeiEndpoint implements Endpoint {
     private static final class CommentsPrefetch implements Runnable {
         private final String videoId;
         private final int limit;
+        private final boolean newest;
         private final Config config;
 
-        CommentsPrefetch(String videoId, int limit, Config config) {
+        CommentsPrefetch(String videoId, int limit, boolean newest, Config config) {
             this.videoId = videoId;
             this.limit = limit;
+            this.newest = newest;
             this.config = config;
         }
 
         @Override
         public void run() {
             try {
-                InnertubeEndpoint.comments(videoId, limit, config);
+                InnertubeEndpoint.comments(videoId, limit, config, newest);
             } catch (Exception e) {
                 android.util.Log.i(TAG, "Prefetch of comments of " + videoId + " failed: " + e);
             }
@@ -927,7 +1320,8 @@ public class YoutubeiEndpoint implements Endpoint {
 
         @Override
         public List<InnertubeEndpoint.Comment> call() throws Exception {
-            return InnertubeEndpoint.comments(videoId, limit, config);
+            List<InnertubeEndpoint.Comment> comments = InnertubeEndpoint.comments(videoId, limit, config);
+            return comments;
         }
     }
 
@@ -1253,9 +1647,11 @@ public class YoutubeiEndpoint implements Endpoint {
             String header = session.getHeaders().get("x-youtube-client-version");
             if (header != null) version = header;
         }
-        java.util.regex.Matcher major = java.util.regex.Pattern.compile("^(\\d+)").matcher(version.trim());
+        java.util.regex.Matcher major = MAJOR_VERSION.matcher(version.trim());
         return major.find() ? Integer.parseInt(major.group(1)) : 6;
     }
+
+    private static final java.util.regex.Pattern MAJOR_VERSION = java.util.regex.Pattern.compile("^(\\d+)");
 
     private static String requestRegion(BareAndroidRequestProto.Root request) {
         if (request.getContextCount() > 0 && request.getContext(0).getClientCount() > 0) {

@@ -84,23 +84,34 @@ public class PlayerLookup {
      * answers of the browser client are refused without it, and it is read out of that script,
      * which is named by the page that loads the player. Kept for a day.
      */
+    // The page writes the player's address with escaped slashes, so the backslash may be there.
+    private static final java.util.regex.Pattern PLAYER_HASH =
+            java.util.regex.Pattern.compile("player\\\\?/([a-zA-Z0-9_-]{6,})\\\\?/");
+    private static final java.util.regex.Pattern SIGNATURE_TIMESTAMP =
+            java.util.regex.Pattern.compile("signatureTimestamp[:=](\\d+)");
+    /** After a failed lookup nobody waits on another one for this long. */
+    private static final long LOOKUP_RETRY_MS = 10L * 60 * 1000;
+    private static long signatureTimestampFailed;
+
     static synchronized String signatureTimestamp(Config config) {
-        if (!signatureTimestamp.isEmpty()
-                && System.currentTimeMillis() - signatureTimestampTime < 24L * 3600 * 1000) {
+        long now = System.currentTimeMillis();
+        if (!signatureTimestamp.isEmpty() && now - signatureTimestampTime < 24L * 3600 * 1000) {
             return signatureTimestamp;
         }
+        // Every player request comes through here, one at a time: a lookup that failed is not
+        // tried again at once, or each of them would wait for youtube.com to fail again.
+        if (now - signatureTimestampFailed < LOOKUP_RETRY_MS) return signatureTimestamp;
+        signatureTimestampFailed = now;
         try {
-            String hash = HttpClient.findInUrl("https://www.youtube.com/iframe_api",
-                    // The page writes the address with escaped slashes, so the backslash may be there.
-                    java.util.regex.Pattern.compile("player\\\\?/([a-zA-Z0-9_-]{6,})\\\\?/"),
+            String hash = HttpClient.findInUrl("https://www.youtube.com/iframe_api", PLAYER_HASH,
                     WEB_USER_AGENT);
             if (hash.isEmpty()) return signatureTimestamp;
             String found = HttpClient.findInUrl("https://www.youtube.com/s/player/" + hash
-                            + "/player_ias.vflset/en_US/base.js",
-                    java.util.regex.Pattern.compile("signatureTimestamp[:=](\\d+)"), WEB_USER_AGENT);
+                            + "/player_ias.vflset/en_US/base.js", SIGNATURE_TIMESTAMP, WEB_USER_AGENT);
             if (!found.isEmpty()) {
                 signatureTimestamp = found;
                 signatureTimestampTime = System.currentTimeMillis();
+                signatureTimestampFailed = 0;
                 android.util.Log.i("PlayerLookup", "player " + hash + ", signature timestamp " + found);
             }
         } catch (Exception error) {
@@ -113,10 +124,15 @@ public class PlayerLookup {
     private static long visitorDataTime;
 
     /** A fresh visitor id (some clients answer LOGIN_REQUIRED without one); cached for a day. */
+    private static long visitorDataFailed;
+
     private static synchronized String freshVisitorData(Config config) {
-        if (visitorData != null && System.currentTimeMillis() - visitorDataTime < 24L * 3600 * 1000) {
+        long now = System.currentTimeMillis();
+        if (visitorData != null && now - visitorDataTime < 24L * 3600 * 1000) {
             return visitorData;
         }
+        if (now - visitorDataFailed < LOOKUP_RETRY_MS) return visitorData == null ? "" : visitorData;
+        visitorDataFailed = now;
         try {
             JSONObject response = InnertubeEndpoint.request("visitor_id", InnertubeEndpoint.context(config), config);
             JSONObject context = response.optJSONObject("responseContext");
@@ -124,6 +140,7 @@ public class PlayerLookup {
             if (!value.isEmpty()) {
                 visitorData = value;
                 visitorDataTime = System.currentTimeMillis();
+                visitorDataFailed = 0;
             }
         } catch (Exception error) {
             android.util.Log.w("PlayerLookup", "Could not get visitor data: " + error.getMessage());
@@ -622,10 +639,11 @@ public class PlayerLookup {
         return bestUrl;
     }
 
+    private static final java.util.regex.Pattern QUALITY_LABEL = java.util.regex.Pattern.compile("([0-9]+)p");
+
     /** Height as YouTube labels the quality ("1080p60" -> 1080), independent of orientation. */
     private static int qualityHeight(JSONObject format) {
-        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("([0-9]+)p")
-                .matcher(format.optString("qualityLabel", ""));
+        java.util.regex.Matcher matcher = QUALITY_LABEL.matcher(format.optString("qualityLabel", ""));
         if (matcher.find()) return Integer.parseInt(matcher.group(1));
         int width = format.optInt("width", 0);
         int height = format.optInt("height", 0);

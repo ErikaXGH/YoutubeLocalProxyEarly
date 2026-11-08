@@ -59,9 +59,11 @@ public final class ProtoReader {
         return value;
     }
 
+    private static final java.nio.charset.Charset UTF_8 = java.nio.charset.Charset.forName("UTF-8");
+
     public String readString() throws IOException {
         int size = readLength();
-        String value = new String(data, position, size, "UTF-8");
+        String value = new String(data, position, size, UTF_8);
         position += size;
         return value;
     }

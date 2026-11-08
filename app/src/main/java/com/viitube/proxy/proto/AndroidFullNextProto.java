@@ -201,6 +201,11 @@ public final class AndroidFullNextProto {
         public ToggleButtonRenderer setToggledText(AndroidFullNextProto.TextRuns value) { mToggledText = value; return this; }
         public AndroidFullNextProto.TextRuns getToggledText() { return mToggledText; }
         public boolean hasToggledText() { return mToggledText != null; }
+        /** Fields 7 and 10: what a tap sends while off and while on (the like buttons). */
+        private ProtoMessage mDefaultServiceEndpoint;
+        private ProtoMessage mToggledServiceEndpoint;
+        public ToggleButtonRenderer setDefaultServiceEndpoint(ProtoMessage value) { mDefaultServiceEndpoint = value; return this; }
+        public ToggleButtonRenderer setToggledServiceEndpoint(ProtoMessage value) { mToggledServiceEndpoint = value; return this; }
 
         @Override
         public void writeTo(ProtoWriter writer) {
@@ -208,8 +213,10 @@ public final class AndroidFullNextProto {
             if (hasIsDisabled) writer.writeInt32(4, mIsDisabled);
             if (mDefaultIcon != null) writer.writeMessage(5, mDefaultIcon);
             if (mDefaultText != null) writer.writeMessage(6, mDefaultText);
+            if (mDefaultServiceEndpoint != null) writer.writeMessage(7, mDefaultServiceEndpoint);
             if (mToggledIcon != null) writer.writeMessage(8, mToggledIcon);
             if (mToggledText != null) writer.writeMessage(9, mToggledText);
+            if (mToggledServiceEndpoint != null) writer.writeMessage(10, mToggledServiceEndpoint);
         }
 
         @Override
@@ -2284,12 +2291,20 @@ public final class AndroidFullNextProto {
         }
         private AndroidFullNextProto.ButtonEndpoint.ShareIntent mShare;
         public ButtonEndpoint setShare(AndroidFullNextProto.ButtonEndpoint.ShareIntent value) { mShare = value; return this; }
+        /** addToPlaylistServiceEndpoint (69487224, abpa): {videoId = 1}; opens "Save to playlist". */
+        private String mAddToPlaylistVideoId;
+        public ButtonEndpoint setAddToPlaylist(String videoId) { mAddToPlaylistVideoId = videoId; return this; }
         public AndroidFullNextProto.ButtonEndpoint.ShareIntent getShare() { return mShare; }
         public boolean hasShare() { return mShare != null; }
 
         @Override
         public void writeTo(ProtoWriter writer) {
             if (mShare != null) writer.writeMessage(106983893, mShare);
+            if (mAddToPlaylistVideoId != null) {
+                ProtoWriter addTo = new ProtoWriter();
+                addTo.writeString(1, mAddToPlaylistVideoId);
+                writer.writeBytes(69487224, addTo.toByteArray());
+            }
         }
 
         @Override
@@ -2396,10 +2411,14 @@ public final class AndroidFullNextProto {
         public java.util.List<AndroidFullNextProto.SlimMetadataButton.SlimMetadataButtonRenderer> getButtonList() { return mButton; }
         public int getButtonCount() { return mButton.size(); }
         public AndroidFullNextProto.SlimMetadataButton.SlimMetadataButtonRenderer getButton(int index) { return mButton.get(index); }
+        /** slimMetadataToggleButtonRenderer (124608045): the like and the dislike button. */
+        private ProtoMessage mToggleButton;
+        public SlimMetadataButton setToggleButton(ProtoMessage value) { mToggleButton = value; return this; }
 
         @Override
         public void writeTo(ProtoWriter writer) {
             for (int i = 0; i < mButton.size(); i++) writer.writeMessage(124608017, mButton.get(i));
+            if (mToggleButton != null) writer.writeMessage(124608045, mToggleButton);
         }
 
         @Override
@@ -3016,6 +3035,17 @@ public final class AndroidFullNextProto {
             // which one shows the like count vs the reply count is checked on the device.
             if (mSecondary != null) writer.writeMessage(5, mSecondary);
             if (mPublishedTime != null) writer.writeMessage(28, mPublishedTime);
+            for (int i = 0; i < mRawFields.size(); i++) {
+                writer.writeBytes((Integer) mRawFields.get(i)[0], (byte[]) mRawFields.get(i)[1]);
+            }
+        }
+
+        // Hand-added: commentRenderer (acey) fields given as raw bytes - 10 the action row
+        // (like, reply, dislike), 28 the like count shown next to it.
+        private final java.util.List<Object[]> mRawFields = new java.util.ArrayList<Object[]>();
+        public CommentRenderer addRawField(int field, byte[] value) {
+            mRawFields.add(new Object[]{field, value});
+            return this;
         }
 
         @Override
@@ -3112,9 +3142,15 @@ public final class AndroidFullNextProto {
         public AndroidFullNextProto.CommentThreadRenderer.CommentWrapper getComment() { return mComment; }
         public boolean hasComment() { return mComment != null; }
 
+        // Hand-added: commentThreadRenderer (acfp) field 2, the replies (union acfd ->
+        // commentRepliesRenderer acez, 65060753), given as raw bytes.
+        private byte[] mRawReplies;
+        public CommentThreadRenderer setRawReplies(byte[] value) { mRawReplies = value; return this; }
+
         @Override
         public void writeTo(ProtoWriter writer) {
             if (mComment != null) writer.writeMessage(1, mComment);
+            if (mRawReplies != null) writer.writeBytes(2, mRawReplies);
         }
 
         @Override
@@ -3303,8 +3339,14 @@ public final class AndroidFullNextProto {
                                     public int getSectionHeaderCount() { return mSectionHeader.size(); }
                                     public AndroidFullNextProto.Root.Contents.SingleColumnWatchNextResults.SingleColumnWatchNextResultsContents.Results.ResultsContents.ItemSectionRenderer.Header.ItemSectionHeaderRenderer getSectionHeader(int index) { return mSectionHeader.get(index); }
 
+                                    // Hand-added: a header renderer given as raw bytes (its union
+                                    // field and message), e.g. commentsHeaderRenderer 105977417.
+                                    private byte[] mRaw;
+                                    public Header setRaw(byte[] value) { mRaw = value; return this; }
+
                                     @Override
                                     public void writeTo(ProtoWriter writer) {
+                                        if (mRaw != null) writer.writeRawBytes(mRaw);
                                         for (int i = 0; i < mSectionHeader.size(); i++) writer.writeMessage(61393757, mSectionHeader.get(i));
                                     }
 

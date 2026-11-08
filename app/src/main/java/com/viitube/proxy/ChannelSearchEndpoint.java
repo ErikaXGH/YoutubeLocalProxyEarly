@@ -158,9 +158,9 @@ public class ChannelSearchEndpoint implements Endpoint {
             if (command != null && !command.optString("token", "").isEmpty()) {
                 return command.optString("token", "");
             }
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length(); i++) {
-                String key = names.optString(i);
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) for (int i = 0; names.hasNext(); i++) {
+                String key = names.next();
                 if ("channelRenderer".equals(key)) continue;
                 String found = findContinuation(object.opt(key));
                 if (!found.isEmpty()) return found;
@@ -192,10 +192,10 @@ public class ChannelSearchEndpoint implements Endpoint {
         if (channels.size() >= limit) return;
         if (node instanceof JSONObject) {
             JSONObject object = (JSONObject) node;
-            JSONArray names = object.names();
+            java.util.Iterator<String> names = object.keys();
             if (names == null) return;
-            for (int i = 0; i < names.length() && channels.size() < limit; i++) {
-                String key = names.optString(i);
+            for (int i = 0; names.hasNext() && channels.size() < limit; i++) {
+                String key = names.next();
                 Object value = object.opt(key);
                 if (("channelRenderer".equals(key) || "gridChannelRenderer".equals(key))
                         && value instanceof JSONObject) {
@@ -218,9 +218,9 @@ public class ChannelSearchEndpoint implements Endpoint {
             JSONObject object = (JSONObject) node;
             String value = object.optString(key, "");
             if (!value.isEmpty()) return value;
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length(); i++) {
-                String found = findFirst(object.opt(names.optString(i)), key);
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) for (int i = 0; names.hasNext(); i++) {
+                String found = findFirst(object.opt(names.next()), key);
                 if (!found.isEmpty()) return found;
             }
         } else if (node instanceof JSONArray) {
