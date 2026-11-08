@@ -1846,7 +1846,12 @@ public final class VideoListProto {
                     for (int i = 0; i < mLength.size(); i++) writer.writeMessage(6, mLength.get(i));
                     for (int i = 0; i < mEndpoint.size(); i++) writer.writeMessage(7, mEndpoint.get(i));
                     if (mInt11 != 0) writer.writeInt32(11, mInt11);
+                    if (mRawMenu != null) writer.writeBytes(19, mRawMenu);
                 }
+
+                // Hand-added: playlistVideoRenderer (aets) field 19, the row's menu (aeal).
+                private byte[] mRawMenu;
+                public Contents setRawMenu(byte[] value) { mRawMenu = value; return this; }
 
                 @Override
                 public void mergeFrom(ProtoReader reader) throws java.io.IOException {
@@ -3884,6 +3889,17 @@ public final class VideoListProto {
                     for (int i = 0; i < mNavigationData.size(); i++) writer.writeMessage(17, mNavigationData.get(i));
                     for (int i = 0; i < mInlineProperty.size(); i++) writer.writeMessage(32, mInlineProperty.get(i));
                     for (int i = 0; i < mInlineProperty2.size(); i++) writer.writeMessage(33, mInlineProperty2.get(i));
+                    for (int i = 0; i < mRawFields.size(); i++) {
+                        writer.writeBytes((Integer) mRawFields.get(i)[0], (byte[]) mRawFields.get(i)[1]);
+                    }
+                }
+
+                // Hand-added: playlistHeaderRenderer (aesr) fields as raw bytes - 45 the save
+                // toggle, 50 the floating play button.
+                private final java.util.List<Object[]> mRawFields = new java.util.ArrayList<Object[]>();
+                public VlHeader addRawField(int field, byte[] value) {
+                    mRawFields.add(new Object[]{field, value});
+                    return this;
                 }
 
                 @Override

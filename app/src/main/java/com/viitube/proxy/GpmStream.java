@@ -122,39 +122,56 @@ final class GpmStream {
         Object existing = LOCKS.putIfAbsent(songId, created);
         Object lock = existing != null ? existing : created;
         synchronized (lock) {
-            synchronized (PLANS) {
-                Mp4Mux.Plan ready = PLANS.get(songId);
-                if (ready != null) return ready;
-            }
-            // The Invidious instance is the audio source: it proxies the stream so this
-            // server can fetch it (YouTube's own stream urls answer 403 server-side).
-            InvidiousLookup.Streams streams = InvidiousLookup.streams(songId, config);
-            if (streams == null || streams.audio == null || streams.audioUrl.isEmpty()) {
-                throw new java.io.IOException("no audio for " + songId);
-            }
-            long started = System.currentTimeMillis();
-            long clen = parseLong(streams.audio.optString("contentLength", "0"));
-            // Download the whole audio once, then remux it from memory: a range request per
-            // fragment through Invidious is what made a track take forever to start.
-            byte[] audio = download(streams.audioUrl, clen);
-            Mp4Mux.putBuffer(songId, audio);
-            Mp4Mux.Plan plan;
             try {
-                plan = Mp4Mux.prepareAudioClassic(streams.audio, "mem:" + songId);
-            } catch (Exception e) {
-                Mp4Mux.dropBuffer(songId);
-                throw e;
+                synchronized (PLANS) {
+                    Mp4Mux.Plan ready = PLANS.get(songId);
+                    if (ready != null) return ready;
+                }
+                // The Invidious instance is the audio source: it proxies the stream so this
+                // server can fetch it (YouTube's own stream urls answer 403 server-side).
+                InvidiousLookup.Streams streams = InvidiousLookup.streams(songId, config);
+                if (streams == null || streams.audio == null || streams.audioUrl.isEmpty()) {
+                    throw new java.io.IOException("no audio for " + songId);
+                }
+                long started = System.currentTimeMillis();
+                long clen = parseLong(streams.audio.optString("contentLength", "0"));
+                // A song played before is on the disk (keyed by the format's size too, so another
+                // bitrate is fetched anew); otherwise the whole audio is downloaded once and remuxed
+                // from memory: a range request per fragment through Invidious made a track take
+                // forever to start.
+                String diskKey = songId + "_" + clen;
+                byte[] audio = clen > 0 ? DiskCache.get(AUDIO_AREA, diskKey) : null;
+                boolean fromDisk = audio != null && audio.length == clen;
+                if (!fromDisk) {
+                    audio = download(streams.audioUrl, clen);
+                    if (clen > 0) DiskCache.put(AUDIO_AREA, diskKey, audio, AUDIO_CACHE_BYTES);
+                }
+                Mp4Mux.putBuffer(songId, audio);
+                Mp4Mux.Plan plan;
+                try {
+                    plan = Mp4Mux.prepareAudioClassic(streams.audio, "mem:" + songId);
+                } catch (Exception e) {
+                    Mp4Mux.dropBuffer(songId);
+                    throw e;
+                }
+                android.util.Log.i("Gpm", "remuxed " + songId + " to classic m4a, "
+                        + plan.length / 1024 + " KB from " + (audio.length / 1024) + " KB"
+                        + (fromDisk ? " (disk)" : "") + " in "
+                        + (System.currentTimeMillis() - started) + "ms");
+                synchronized (PLANS) {
+                    PLANS.put(songId, plan);
+                }
+                return plan;
+            } finally {
+                // Also after a failure: a lock left behind kept the song's next try waiting on it.
+                LOCKS.remove(songId);
             }
-            android.util.Log.i("Gpm", "remuxed " + songId + " to classic m4a, "
-                    + plan.length / 1024 + " KB from " + (audio.length / 1024) + " KB in "
-                    + (System.currentTimeMillis() - started) + "ms");
-            synchronized (PLANS) {
-                PLANS.put(songId, plan);
-            }
-            LOCKS.remove(songId);
-            return plan;
         }
     }
+
+    /** Songs kept on the disk: a few dozen at the usual 4-6 MB. */
+    private static final String AUDIO_AREA = "gpm_audio";
+    private static final long AUDIO_CACHE_BYTES = 150L * 1024 * 1024;
 
     static NanoHTTPD.Response serve(NanoHTTPD.IHTTPSession session, Config config, Context context) {
         String songId = session.getParms().get("songid");

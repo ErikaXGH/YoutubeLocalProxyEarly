@@ -52,6 +52,14 @@ public final class SortMenuProto extends ProtoMessage {
     }
 
 
+    private boolean showIcon = true;
+
+    /** The menu without the sort icon: its title and the drop-down arrow ("Videos only"). */
+    public SortMenuProto withoutIcon() {
+        showIcon = false;
+        return this;
+    }
+
     @Override
     public void writeTo(ProtoWriter writer) {
         ProtoWriter menu = new ProtoWriter();                    // afkc
@@ -63,9 +71,11 @@ public final class SortMenuProto extends ProtoMessage {
             menu.writeBytes(1, item.toByteArray());
         }
         menu.writeString(2, title);
-        ProtoWriter icon = new ProtoWriter();
-        icon.writeInt32(1, ICON_SORT);
-        menu.writeBytes(3, icon.toByteArray());
+        if (showIcon) {
+            ProtoWriter icon = new ProtoWriter();
+            icon.writeInt32(1, ICON_SORT);
+            menu.writeBytes(3, icon.toByteArray());
+        }
         writer.writeBytes(76818770, menu.toByteArray());         // afdi
     }
 

@@ -98,6 +98,15 @@ final class AccountActions {
         if (path.equals("like/like") || path.equals("like/dislike") || path.equals("like/removelike")) {
             List<String> ids = strings(body, VIDEO_ID);
             if (ids.isEmpty()) {
+                // Saving a playlist to the library is a like of the playlist (no video in it).
+                for (String playlist : strings(body, PLAYLIST_ID)) {
+                    if (playlist.length() > 2) {
+                        call(path, "playlist:" + playlist, config);
+                        return true;
+                    }
+                }
+            }
+            if (ids.isEmpty()) {
                 android.util.Log.w(TAG, path + ": no video id in the request");
                 return true;
             }
@@ -124,7 +133,10 @@ final class AccountActions {
         }
         try {
             JSONObject payload = InnertubeEndpoint.context(config);
-            if (path.startsWith("like/")) {
+            if (path.startsWith("like/") && value.startsWith("playlist:")) {
+                payload.put("target", new JSONObject().put("playlistId", value.substring(9)));
+                InnertubeEndpoint.forgetAccountLists();
+            } else if (path.startsWith("like/")) {
                 payload.put("target", new JSONObject().put("videoId", value));
             } else {
                 payload.put("channelIds", new JSONArray().put(value));

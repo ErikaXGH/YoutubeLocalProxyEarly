@@ -586,15 +586,24 @@ public class YoutubeiEndpoint implements Endpoint {
         }
         if (id.startsWith("FEtrending") || id.startsWith("FEmusic")) {
             boolean music = id.startsWith("FEmusic");
+            // A category of the Trending tab's bar ("vtpcat:Gaming"), or the whole chart.
+            String params = request.getParams();
+            String category = music ? "Music" : "";
+            if (!music && params.startsWith(CATEGORY_PARAMS)) {
+                String chosen = params.substring(CATEGORY_PARAMS.length());
+                for (String known : TRENDING_CATEGORIES) if (known.equals(chosen)) category = chosen;
+            }
+            boolean feedCards = version >= YoutubeiResponses.PIVOT_BAR_VERSION;
             String key = (music ? "music_" : "trending_") + gl
-                    + (version >= YoutubeiResponses.PIVOT_BAR_VERSION ? "_v12" : "");
+                    + (category.isEmpty() || music ? "" : "_" + category)
+                    + (feedCards ? "_v12" : "");
             byte[] cached = cached(context, key, POPULAR_MAX_AGE_MS);
             if (cached != null) return protobuf(cached);
-            List<InnertubeEndpoint.Video> videos = popular(gl, music ? "Music" : "", 30, config);
-            boolean feedCards = version >= YoutubeiResponses.PIVOT_BAR_VERSION;
-            byte[] answer = YoutubeiResponses.videoList(music ? "FEmusic" : "Trending",
-                    music ? "Music" : "Trending", videos, now, feedCards,
-                    feedCards ? feedAvatars(videos, config) : NO_AVATARS);
+            List<InnertubeEndpoint.Video> videos = popular(gl, category, 30, config);
+            String title = music ? "Music" : category.isEmpty() ? "Trending" : YoutubeiResponses.tr(category);
+            com.viitube.proxy.proto.ChannelBarProto bar = feedCards && !music ? categoryBar() : null;
+            byte[] answer = YoutubeiResponses.videoList(music ? "FEmusic" : "Trending", title, videos, now,
+                    feedCards, feedCards ? feedAvatars(videos, config) : NO_AVATARS, bar, null);
             if (!videos.isEmpty()) store(context, key, answer);
             return protobuf(answer);
         }
@@ -613,6 +622,11 @@ public class YoutubeiEndpoint implements Endpoint {
             }
         }
         if (id.startsWith("FEsubscriptions")) return protobuf(YoutubeiResponses.subscriptions());
+        if (id.equals(YoutubeiResponses.ALL_CHANNELS) && YouTubeAuth.signedIn()) {
+            // "ALL" of the Subscriptions bar: every subscribed channel.
+            return protobuf(YoutubeiResponses.channelList(id, YoutubeiResponses.tr("Subscriptions"),
+                    InnertubeEndpoint.subscribedChannels(config)));
+        }
         if (id.startsWith("FElibrary")) {
             return protobuf(YoutubeiResponses.library(InnertubeEndpoint.accountPlaylists(config)));
         }
@@ -836,6 +850,24 @@ public class YoutubeiEndpoint implements Endpoint {
      */
     private static final int COMMUNITY_POSTS = 10;
 
+
+    /** The params of a Trending category ("vtpcat:Gaming"). */
+    private static final String CATEGORY_PARAMS = "vtpcat:";
+
+    /** The categories over the Trending tab, as the 2018 apps had them (query words). */
+    private static final String[] TRENDING_CATEGORIES = {"Music", "Gaming", "News", "Movies"};
+
+    /** The Trending categories' bar, with the pictures the proxy draws (IconEndpoint). */
+    private static com.viitube.proxy.proto.ChannelBarProto categoryBar() {
+        List<com.viitube.proxy.proto.ChannelBarProto.Channel> entries =
+                new ArrayList<com.viitube.proxy.proto.ChannelBarProto.Channel>();
+        for (String name : TRENDING_CATEGORIES) {
+            entries.add(new com.viitube.proxy.proto.ChannelBarProto.Channel("FEtrending",
+                    YoutubeiResponses.tr(name), "http://127.0.0.1:8080/proxy/icon/category_" + name + ".png",
+                    CATEGORY_PARAMS + name));
+        }
+        return new com.viitube.proxy.proto.ChannelBarProto(entries).withTitles();
+    }
 
     private static final class ChannelInfoTask implements Callable<ChannelEndpoint.ChannelInfo> {
         private final String channelId;

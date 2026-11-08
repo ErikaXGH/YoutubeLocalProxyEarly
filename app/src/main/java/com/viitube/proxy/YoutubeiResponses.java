@@ -73,6 +73,14 @@ final class YoutubeiResponses {
         if (!isPolish()) return english;
         if ("Sort by".equals(english)) return "Sortuj według";
         if ("Upload".equals(english)) return "Prześlij";
+        if ("Save to playlist".equals(english)) return "Zapisz na playliście";
+        if ("Play all".equals(english)) return "Odtwórz wszystko";
+        if ("Videos only".equals(english)) return "Tylko filmy";
+        if ("Music".equals(english)) return "Muzyka";
+        if ("Subscriptions".equals(english)) return "Subskrypcje";
+        if ("Gaming".equals(english)) return "Gry";
+        if ("News".equals(english)) return "Wiadomości";
+        if ("Movies".equals(english)) return "Filmy";
         if ("Top comments".equals(english)) return "Najlepsze komentarze";
         if ("Add a public comment...".equals(english)) return "Dodaj publiczny komentarz...";
         if ("Newest first".equals(english)) return "Najpierw najnowsze";
@@ -749,8 +757,8 @@ final class YoutubeiResponses {
     static byte[] videoList(String identifier, String title, List<InnertubeEndpoint.Video> videos,
                             long now, boolean feedCards, java.util.Map<String, String> avatars,
                             List<String[]> channelBar) {
-        VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs tab =
-                tab(identifier, title, true, 0, videoSections(videos, now, feedCards, avatars));
+        com.viitube.proxy.proto.ChannelBarProto bar = null;
+        com.viitube.proxy.proto.ProtoMessage header = null;
         if (channelBar != null && !channelBar.isEmpty()) {
             List<com.viitube.proxy.proto.ChannelBarProto.Channel> channels =
                     new java.util.ArrayList<com.viitube.proxy.proto.ChannelBarProto.Channel>();
@@ -758,8 +766,32 @@ final class YoutubeiResponses {
                 channels.add(new com.viitube.proxy.proto.ChannelBarProto.Channel(
                         channel[0], channel[1], avatarOrDefault(channel[2])));
             }
-            tab.getTabRender(0).getContentsEntry(0).getContentArray(0)
-                    .setSubMenu(new com.viitube.proxy.proto.ChannelBarProto(channels));
+            // The Subscriptions feed of 12.x: the channels, "ALL" at the end of them (the list
+            // of every subscription) and "Videos only" over the feed.
+            bar = new com.viitube.proxy.proto.ChannelBarProto(channels).withAll(ALL_CHANNELS);
+            String label = tr("Videos only");
+            header = new com.viitube.proxy.proto.SortMenuProto(label, new String[]{label},
+                    new com.viitube.proxy.proto.ProtoMessage[]{browseNavigation("FEsubscriptions", null, null)},
+                    0).withoutIcon().header(label);
+        }
+        return videoList(identifier, title, videos, now, feedCards, avatars, bar, header);
+    }
+
+    /** The browse id of the list of every subscribed channel (the bar's "ALL"). */
+    static final String ALL_CHANNELS = "FEchannels";
+
+    /** With a bar over the list (channels, categories) and a header on its first section. */
+    static byte[] videoList(String identifier, String title, List<InnertubeEndpoint.Video> videos,
+                            long now, boolean feedCards, java.util.Map<String, String> avatars,
+                            com.viitube.proxy.proto.ChannelBarProto bar,
+                            com.viitube.proxy.proto.ProtoMessage sectionHeader) {
+        VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs tab =
+                tab(identifier, title, true, 0, videoSections(videos, now, feedCards, avatars));
+        VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer
+                .ContentEntry.ContentData data = tab.getTabRender(0).getContentsEntry(0).getContentArray(0);
+        if (bar != null) data.setSubMenu(bar);
+        if (sectionHeader != null && data.getCCount() > 0 && data.getC(0).getSectionCount() > 0) {
+            data.getC(0).getSection(0).setHeader(sectionHeader);
         }
         VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer tabs =
                 new VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer().addTab(tab);
@@ -967,6 +999,22 @@ final class YoutubeiResponses {
         return finishBrowse(root, tabs, header);
     }
 
+    /** A page listing channels ({id, name, avatar}), as cards opening them. */
+    static byte[] channelList(String identifier, String title, List<String[]> channels) {
+        VideoListProto.ItemSectionRenderer section = new VideoListProto.ItemSectionRenderer();
+        for (String[] channel : channels) {
+            section.addIcsContent(new VideoListProto.ItemSectionRenderer.IcsContents().addChannel(
+                    browseChannel(new String[]{channel[0], channel[1], channel[2], ""})));
+        }
+        VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer
+                .ContentEntry.ContentData.ContentActualData content = tabContent();
+        content.addSection(section);
+        VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer tabs =
+                new VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer()
+                        .addTab(tab(identifier, title, true, 0, content));
+        return finishBrowse(browseRoot(), tabs, textHeader(title));
+    }
+
     /** A channel card from {id, name, avatar, subscribers}; tapping it opens the channel. */
     private static VideoListProto.ChannelRenderer browseChannel(String[] channel) {
         VideoListProto.ChannelRenderer renderer = new VideoListProto.ChannelRenderer()
@@ -1128,6 +1176,31 @@ final class YoutubeiResponses {
         return rawField(66439850, menu.toByteArray());                                 // aeal
     }
 
+    /** The addToPlaylistEndpoint of a NavigationEndpoint (acdz 69487224, abpa {videoId = 1}). */
+    private static final int ADD_TO_PLAYLIST_ENDPOINT = 69487224;
+
+    /**
+     * A video's menu (menuRenderer aeal 66439850 -> aeaj {items = 1, each aeah 66441108 ->
+     * aeai {text = 1, icon = 2, endpoint = 3}}): Save to playlist (the app's own dialog, which
+     * lists the account's playlists) when signed in, and Share.
+     */
+    private static byte[] videoMenu(String videoId, String title) {
+        com.viitube.proxy.proto.ProtoWriter menu = new com.viitube.proxy.proto.ProtoWriter();    // aeaj
+        if (YouTubeAuth.signedIn()) {
+            com.viitube.proxy.proto.ProtoWriter save = new com.viitube.proxy.proto.ProtoWriter(); // aeai
+            save.writeBytes(1, formattedBytes(tr("Save to playlist")));
+            save.writeBytes(2, iconBytes(ICON_ADDTO));
+            save.writeBytes(3, rawField(ADD_TO_PLAYLIST_ENDPOINT, stringField(1, videoId)));
+            menu.writeBytes(1, rawField(66441108, save.toByteArray()));
+        }
+        com.viitube.proxy.proto.ProtoWriter share = new com.viitube.proxy.proto.ProtoWriter();   // aeai
+        share.writeBytes(1, formattedBytes(tr("Share")));
+        share.writeBytes(2, iconBytes(ICON_SHARE));
+        share.writeBytes(3, shareEndpoint(videoId, title).toByteArray());
+        menu.writeBytes(1, rawField(66441108, share.toByteArray()));
+        return rawField(66439850, menu.toByteArray());
+    }
+
     /** The post's text as runs, the linked ones opening their address. */
     private static VideoListProto.TextRuns postRuns(List<String[]> pieces) {
         VideoListProto.TextRuns runs = new VideoListProto.TextRuns();
@@ -1164,6 +1237,58 @@ final class YoutubeiResponses {
         return shortCount(parseCount(subscribers), "subscribers");
     }
 
+    // The playlist header's buttons (playlistHeaderRenderer aesr of 12.45.56, drawn by gbk).
+    private static final int ICON_PLAYLIST_ADD = 46;
+    private static final int ICON_OFFLINE_DOWNLOAD = 147;
+    private static final int ICON_PLAY = 247;
+    private static final int WATCH_ENDPOINT = 48687757;   // acdz {videoId 1, playlistId 2, index 3}
+    private static final int LIKE_ENDPOINT = 63158558;    // acdz adqn {status 1, target 2}
+
+    /**
+     * The red play button floating over the header's edge (field 50: union aeso {95228729: adjm
+     * {icon = 1, endpoint = 2, accessibility = 4}}, drawn by the app's fab controller dla; its
+     * endpoint a watchEndpoint of the first video in the playlist). Field 47 is the share
+     * button's endpoint, not this. For the signed-in
+     * account the save toggle (field 45: union abxg {toggle afqg 79971800}), whose endpoints
+     * like/removelike the playlist (adqn target adqq {playlistId = 2}). Watch later and Liked
+     * videos are the account's own lists and have no save toggle.
+     */
+    private static void addPlaylistButtons(VideoListProto.Root.HeaderRender.VlHeader vl, String playlistId,
+                                           PlaylistEndpoint.Playlist playlist) {
+        if (!playlist.videos.isEmpty()) {
+            com.viitube.proxy.proto.ProtoWriter watch = new com.viitube.proxy.proto.ProtoWriter();
+            watch.writeString(1, playlist.videos.get(0).id);
+            watch.writeString(2, playlistId);
+            com.viitube.proxy.proto.ProtoWriter play = new com.viitube.proxy.proto.ProtoWriter(); // adjm
+            play.writeBytes(1, iconBytes(ICON_PLAY));
+            play.writeBytes(2, rawField(WATCH_ENDPOINT, watch.toByteArray()));
+            play.writeBytes(4, stringField(1, tr("Play all")));
+            vl.addRawField(50, rawField(95228729, play.toByteArray()));
+        }
+        if (YouTubeAuth.signedIn() && !playlistId.equals("WL") && !playlistId.equals("LL")) {
+            com.viitube.proxy.proto.ProtoWriter toggle = new com.viitube.proxy.proto.ProtoWriter(); // afqg
+            toggle.writeBytes(5, iconBytes(ICON_PLAYLIST_ADD));
+            toggle.writeBytes(7, playlistLike(playlistId, 0));
+            toggle.writeBytes(8, iconBytes(ICON_PLAYLIST_ADD));
+            toggle.writeBytes(10, playlistLike(playlistId, 2));
+            vl.addRawField(45, rawField(79971800, toggle.toByteArray()));
+        }
+    }
+
+    /** likeEndpoint for a playlist: status 0 like, 2 remove the like. */
+    private static byte[] playlistLike(String playlistId, int status) {
+        com.viitube.proxy.proto.ProtoWriter like = new com.viitube.proxy.proto.ProtoWriter();     // adqn
+        if (status != 0) like.writeInt32(1, status);
+        like.writeBytes(2, stringField(2, playlistId));
+        return rawField(LIKE_ENDPOINT, like.toByteArray());
+    }
+
+    private static byte[] stringField(int field, String value) {
+        com.viitube.proxy.proto.ProtoWriter writer = new com.viitube.proxy.proto.ProtoWriter();
+        writer.writeString(field, value);
+        return writer.toByteArray();
+    }
+
     /** VL... playlist page. */
     static byte[] playlist(String playlistId, PlaylistEndpoint.Playlist playlist) {
         VideoListProto.Root root = browseRoot();
@@ -1179,6 +1304,7 @@ final class YoutubeiResponses {
                 .setPublic(1)
                 .addNavigationData(browseNavigation(playlistId, null, null))
                 .addInlineProperty(browseRuns(count));
+        addPlaylistButtons(vl, playlistId, playlist);
         VideoListProto.Root.HeaderRender header = new VideoListProto.Root.HeaderRender().addPlaylistHeader(vl);
 
         VideoListProto.PlaylistData data = new VideoListProto.PlaylistData().setId(playlistId);
@@ -1198,6 +1324,7 @@ final class YoutubeiResponses {
                                             .setId(video.id).setPlaylistId(playlistId)
                                             // The place in the queue the app asks /next for.
                                             .setIndex(index)));
+            contents.setRawMenu(videoMenu(video.id, video.title));
             data.addVideo(new VideoListProto.PlaylistData.PlaylistVideo().addContent(contents));
         }
         VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer

@@ -86,6 +86,7 @@ public class GpmEndpoint implements Endpoint {
             return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.NOT_FOUND,
                     "text/plain", "play music support is off");
         }
+        DiskCache.init(context);
         String uri = session.getUri();
         String query = session.getQueryParameterString();
         String body = readBody(session);
@@ -118,6 +119,9 @@ public class GpmEndpoint implements Endpoint {
         }
         return artResponse((byte[]) art[0], (String) art[1]);
     }
+
+    private static final String ART_AREA = "gpm_art";
+    private static final long ART_DISK_BYTES = 30L * 1024 * 1024;
 
     /** One lock per cover, so a prefetch and the app's own request do not fetch it twice. */
     private static final java.util.concurrent.ConcurrentHashMap<String, Object> ART_LOCKS =
@@ -169,6 +173,12 @@ public class GpmEndpoint implements Endpoint {
             try {
                 kept = cachedArt(videoId);
                 if (kept != null) return kept;
+                // Covers served before are on the disk (they are all JPEGs).
+                byte[] stored = DiskCache.get(ART_AREA, videoId);
+                if (stored != null) {
+                    keepArt(videoId, stored, "image/jpeg");
+                    return new Object[]{stored, "image/jpeg"};
+                }
                 // The square album art the search found, then the video frame as a fallback.
                 java.util.List<String> urls = new java.util.ArrayList<String>();
                 String remembered = rememberedArt(videoId);
@@ -197,6 +207,7 @@ public class GpmEndpoint implements Endpoint {
                         String type = conn.getContentType();
                         if (type == null || !type.startsWith("image/")) type = "image/jpeg";
                         keepArt(videoId, image, type);
+                        if (type.equals("image/jpeg")) DiskCache.put(ART_AREA, videoId, image, ART_DISK_BYTES);
                         return new Object[]{image, type};
                     } catch (Exception e) {
                         android.util.Log.i(TAG, "art " + imageUrl + " failed: " + e);
