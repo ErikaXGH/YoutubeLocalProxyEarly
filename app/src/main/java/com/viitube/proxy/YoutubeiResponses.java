@@ -2375,8 +2375,11 @@ final class YoutubeiResponses {
             itag = 17;
             quality = "tiny";
         }
+        // The H.264 level has to allow the size: the app drops a format its decoder cannot take,
+        // and level 3.1 (64001F) stops at 720p - 1080p is level 4.0 (640028), as YouTube's own.
+        String level = height > 720 ? "640028" : "64001F";
         return new StreamFormat(itag, url, height * 16 / 9, height, quality, height + "p",
-                "video/mp4; codecs=\"avc1.64001F, mp4a.40.2\"");
+                "video/mp4; codecs=\"avc1." + level + ", mp4a.40.2\"");
     }
 
     static byte[] player(PlayerInfo info) {

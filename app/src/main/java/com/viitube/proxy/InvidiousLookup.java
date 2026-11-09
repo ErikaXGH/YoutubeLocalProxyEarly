@@ -115,6 +115,13 @@ final class InvidiousLookup {
      * The single file with sound the instance has for the video (itag 22 when it still exists,
      * otherwise 360p), or null. Comes out of the same answer as the 720p streams.
      */
+    /** Drops the streams kept for a video, after its links stopped working. */
+    static void forget(String videoId) {
+        synchronized (STREAMS) {
+            STREAMS.remove(videoId);
+        }
+    }
+
     static String progressiveUrl(String videoId, Config config) {
         Streams streams = streams(videoId, config);
         return streams == null || streams.progressive.isEmpty() ? null : streams.progressive;
@@ -159,6 +166,27 @@ final class InvidiousLookup {
         boolean has720() {
             return pair(720) != null;
         }
+
+        /**
+         * Bytes per second of the muxed file at {@code height}: the H.264 video stream's bitrate
+         * plus the audio's, as the instance reports them; 0 when it does not say.
+         */
+        long bytesPerSecond(int height) {
+            JSONObject video = pickAdaptive(adaptive, "video/mp4", "avc1", height);
+            if (video == null) return 0;
+            long bits = parseBits(video.optString("bitrate", "0"));
+            if (bits <= 0) return 0;
+            long audioBits = audio == null ? 0 : parseBits(audio.optString("bitrate", "0"));
+            return (bits + audioBits) / 8;
+        }
+
+        private static long parseBits(String value) {
+            try {
+                return Long.parseLong(value.trim());
+            } catch (NumberFormatException e) {
+                return 0;
+            }
+        }
     }
 
     private static final Map<String, Object[]> STREAMS =
@@ -182,25 +210,116 @@ final class InvidiousLookup {
                 return (Streams) cached[0];
             }
         }
-        // Try the instances one after another until one answers in time with usable streams. A
-        // dead one - no connection, a timeout, an error, or an empty answer - is skipped, and the
-        // one that works is remembered so it is tried first next time.
-        for (String instance : instances(config)) {
-            Streams streams;
-            try {
-                streams = fetchFrom(instance, videoId, config);
-            } catch (Exception e) {
-                android.util.Log.i(TAG, "Streams of " + videoId + " at " + instance + " failed: " + e);
-                continue;
+        synchronized (FAILED) {
+            Long failedAt = FAILED.get(videoId);
+            if (failedAt != null && System.currentTimeMillis() - failedAt.longValue() < FAILED_RETRY_MS) {
+                return null;
             }
-            if (streams == null) continue;
-            lastGood = instance;
-            synchronized (STREAMS) {
-                STREAMS.put(videoId, new Object[]{streams, System.currentTimeMillis()});
+        }
+        // The instances are raced: the one that worked last gets a head start, then the others
+        // are asked a few at a time, and the first usable answer wins. Asked one after another,
+        // every dead instance on the list cost its whole timeout before the next was tried.
+        List<String> list = instances(config);
+        java.util.concurrent.ExecutorCompletionService<Object[]> race =
+                new java.util.concurrent.ExecutorCompletionService<Object[]>(LOOKUPS);
+        List<java.util.concurrent.Future<Object[]>> started =
+                new ArrayList<java.util.concurrent.Future<Object[]>>();
+        int next = 0;
+        int pending = 0;
+        boolean failure = false;
+        long now = System.currentTimeMillis();
+        long headStartEnd = now + HEAD_START_MS;
+        long deadline = now + RACE_TIMEOUT_MS;
+        try {
+            while (true) {
+                now = System.currentTimeMillis();
+                if (next == 0 && !list.isEmpty()) {
+                    started.add(race.submit(new Lookup(list.get(next++), videoId, config)));
+                    pending++;
+                }
+                // The first instance is alone until its head start is over or it has failed.
+                boolean alone = !failure && now < headStartEnd;
+                while (!alone && pending < RACE_WIDTH && next < list.size()) {
+                    started.add(race.submit(new Lookup(list.get(next++), videoId, config)));
+                    pending++;
+                }
+                if (pending == 0 || now >= deadline) break;
+                long wait = (alone ? headStartEnd : deadline) - now;
+                java.util.concurrent.Future<Object[]> done =
+                        race.poll(Math.max(1, wait), java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (done == null) continue;   // the head start or the deadline is over
+                pending--;
+                Object[] result = done.get();
+                if (result[1] == null) {
+                    failure = true;
+                    continue;
+                }
+                Streams streams = (Streams) result[1];
+                lastGood = (String) result[0];
+                synchronized (STREAMS) {
+                    STREAMS.put(videoId, new Object[]{streams, System.currentTimeMillis()});
+                }
+                return streams;
             }
-            return streams;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (java.util.concurrent.ExecutionException e) {
+            android.util.Log.i(TAG, "Streams lookup of " + videoId + " failed: " + e);
+        } finally {
+            for (java.util.concurrent.Future<Object[]> future : started) future.cancel(true);
+        }
+        synchronized (FAILED) {
+            FAILED.put(videoId, Long.valueOf(System.currentTimeMillis()));
         }
         return null;
+    }
+
+    /** Instances asked at the same time, and how long the race may take in all. */
+    private static final int RACE_WIDTH = 3;
+    private static final long HEAD_START_MS = 1000;
+    private static final long RACE_TIMEOUT_MS = 20000;
+    /** A video no instance could play is not asked for again for a while. */
+    private static final long FAILED_RETRY_MS = 3L * 60 * 1000;
+    private static final Map<String, Long> FAILED = new LinkedHashMap<String, Long>(8, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Long> eldest) {
+            return size() > 32;
+        }
+    };
+
+    private static final java.util.concurrent.ExecutorService LOOKUPS =
+            java.util.concurrent.Executors.newCachedThreadPool(new java.util.concurrent.ThreadFactory() {
+                private int count;
+
+                @Override
+                public synchronized Thread newThread(Runnable task) {
+                    Thread thread = new Thread(task, "invidious-" + (++count));
+                    thread.setDaemon(true);
+                    return thread;
+                }
+            });
+
+    /** One instance's answer: {instance, Streams or null}. */
+    private static final class Lookup implements java.util.concurrent.Callable<Object[]> {
+        private final String instance;
+        private final String videoId;
+        private final Config config;
+
+        Lookup(String instance, String videoId, Config config) {
+            this.instance = instance;
+            this.videoId = videoId;
+            this.config = config;
+        }
+
+        @Override
+        public Object[] call() {
+            try {
+                return new Object[]{instance, fetchFrom(instance, videoId, config)};
+            } catch (Exception e) {
+                android.util.Log.i(TAG, "Streams of " + videoId + " at " + instance + " failed: " + e);
+                return new Object[]{instance, null};
+            }
+        }
     }
 
     /**

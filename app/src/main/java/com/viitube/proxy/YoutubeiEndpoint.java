@@ -1386,6 +1386,33 @@ public class YoutubeiEndpoint implements Endpoint {
     }
 
     /**
+     * The highest quality up to {@code max} the link can carry without stalling, the way
+     * YouTube's own automatic quality picks: the muxed file's bitrate must stay under 85% of
+     * what the last downloads measured. Before anything was measured the highest one is taken.
+     */
+    /** Longest video still muxed: a 21-minute one (370 fragments) was ready in about 38 s. */
+    private static final int MUX_MAX_SECONDS = 22 * 60;
+
+    private static int bestHeight(InvidiousLookup.Streams streams, int max) {
+        double link = Mp4Mux.linkBytesPerSecond();
+        int best = 0;
+        int lowest = 0;
+        for (Integer value : streams.heights) {
+            int h = value.intValue();
+            if (h > max) continue;
+            if (lowest == 0 || h < lowest) lowest = h;
+            long needed = streams.bytesPerSecond(h);
+            boolean fits = link <= 0 || needed <= 0 || needed <= link * 0.85;
+            if (fits && h > best) best = h;
+        }
+        if (best == 0) best = lowest > 0 ? lowest : 720;
+        if (link > 0) {
+            android.util.Log.i(TAG, "link " + Math.round(link / 1024) + " KB/s: " + best + "p");
+        }
+        return best;
+    }
+
+    /**
      * Video details and stream URLs. The 360p file is linked directly on googlevideo.com, like
      * the real API did; the experimental 720p mode adds the stream muxed by this proxy.
      */
@@ -1449,26 +1476,59 @@ public class YoutubeiEndpoint implements Endpoint {
         YoutubeiResponses.StreamFormat small = url != null ? YoutubeiResponses.progressive360p(url)
                 : withInstance && !streams.progressive.isEmpty()
                         ? YoutubeiResponses.progressive360p(streams.progressive) : null;
-        if (withInstance && "select".equals(mode)) {
+        // A muxed file has to read the header of every fragment before its first byte can go out
+        // (about 17 fragments a minute, a few seconds each over the phone's link). Past
+        // MUX_MAX_SECONDS that takes longer than the app waits: it freezes on the spinner and
+        // then shows a black screen. Such videos are played from the direct 360p file only.
+        boolean tooLongToMux = info.lengthSeconds > MUX_MAX_SECONDS && small != null;
+        if (tooLongToMux && !"360p".equals(mode)) {
+            android.util.Log.i(TAG, videoId + ": " + info.lengthSeconds + "s, too long to mux, 360p only");
+            info.formats.add(small);
+        } else if (withInstance && "select".equals(mode)) {
             // Every quality the instance has, climbing from 144p. The apps sort the formats and
             // then drop each one whose quality is lower than the entry before it, so a falling
             // list leaves a single item and no menu at all. 360p stays the direct YouTube link.
             List<Integer> heights = new ArrayList<Integer>(streams.heights);
             java.util.Collections.sort(heights);
             boolean has360 = false;
+            // 1080p is listed like the others (itag 37); the app itself keeps it only on phones
+            // whose decoder it judges able to play it.
             for (Integer height : heights) {
                 int value = height.intValue();
                 if (value == 360 && small != null) {
                     info.formats.add(small);
                     has360 = true;
-                } else {
+                } else if (value <= 1080) {
                     info.formats.add(YoutubeiResponses.muxedQuality(value, proxy + "?q=" + value));
                 }
             }
             if (!has360 && small != null) info.formats.add(0, small);
+            // The app keeps picking the quality it picked last time; that one is built ahead.
+            int picked = VideoRedirectEndpoint.lastSelected;
+            if (picked > 0 && (picked != 360 || small == null)) {
+                VideoRedirectEndpoint.warm(videoId, config, picked,
+                        VideoRedirectEndpoint.newPlayer(session.getHeaders().get("user-agent")));
+            }
         } else if (!"360p".equals(mode) && (withInstance || small != null)) {
             // A format chosen in the settings: only that one, so nothing else can be picked.
-            info.formats.add(YoutubeiResponses.muxed720p(proxy));
+            // 1080p is the highest the video has up to 1080 (720p when it has no 1080p).
+            int height = VideoRedirectEndpoint.defaultHeight(mode);
+            if (withInstance && "mux1080".equals(mode)) height = bestHeight(streams, 1080);
+            if (height > 720) {
+                // 720p first: a phone the app does not trust with 1080p drops that entry and
+                // plays 720p instead of failing; the others are given 1080p.
+                info.formats.add(YoutubeiResponses.muxedQuality(720, proxy + "?q=720"));
+            }
+            info.formats.add(height == 720 && !"mux1080".equals(mode)
+                    ? YoutubeiResponses.muxed720p(proxy)
+                    : YoutubeiResponses.muxedQuality(height, proxy + "?q=" + height));
+            // The muxed file is built now, while the app is still opening the video, so the
+            // request for it finds the work done or under way.
+            if (withInstance && (mode.startsWith("mux"))) {
+                VideoRedirectEndpoint.warm(videoId, config,
+                        VideoRedirectEndpoint.appCapsAt720 ? Math.min(720, height) : height,
+                        VideoRedirectEndpoint.newPlayer(session.getHeaders().get("user-agent")));
+            }
         } else if (small != null) {
             info.formats.add(small);
         }

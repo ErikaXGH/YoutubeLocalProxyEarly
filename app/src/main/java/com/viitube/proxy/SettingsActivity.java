@@ -40,6 +40,7 @@ public class SettingsActivity extends Activity {
     private static final int MODE_AUDIO = 103;
     private static final int MODE_MUX720 = 104;
     private static final int MODE_SELECT = 105;
+    private static final int MODE_MUX1080 = 106;
 
     /** Ids of the audio-quality radio buttons. */
     private static final int AUDIO_HIGH = 201;
@@ -323,6 +324,8 @@ public class SettingsActivity extends Activity {
         playbackModes.addView(radio(MODE_1080P, "1080p video only (no audio)"));
         playbackModes.addView(radio(MODE_AUDIO, "Audio only (highest available quality)"));
         playbackModes.addView(radio(MODE_MUX720, "720p video with audio (muxed on this phone)"));
+        playbackModes.addView(radio(MODE_MUX1080,
+                "1080p video with audio when the video has it (muxed on this phone)"));
         RadioButton select = radio(MODE_SELECT, "Select in app (every quality there is)");
         playbackModes.addView(select);
         option(screen, "Playback format", playbackModes,
@@ -548,6 +551,7 @@ public class SettingsActivity extends Activity {
             case MODE_1080P: return "video1080";
             case MODE_AUDIO: return "audio";
             case MODE_MUX720: return "mux720";
+            case MODE_MUX1080: return "mux1080";
             case MODE_SELECT: return "select";
             default: return "360p";
         }
@@ -557,6 +561,7 @@ public class SettingsActivity extends Activity {
         if ("video1080".equals(mode)) return MODE_1080P;
         if ("audio".equals(mode)) return MODE_AUDIO;
         if ("mux720".equals(mode)) return MODE_MUX720;
+        if ("mux1080".equals(mode)) return MODE_MUX1080;
         if ("select".equals(mode)) return MODE_SELECT;
         return MODE_360P;
     }

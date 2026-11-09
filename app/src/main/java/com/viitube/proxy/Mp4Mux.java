@@ -32,6 +32,8 @@ final class Mp4Mux {
                     + "Chrome/131.0.0.0 Safari/537.36";
     /** Source runs (about 5 s of video or 10 s of audio each) downloaded ahead of the player. */
     private static final int PREFETCH_RUNS = 6;
+    /** Read-ahead in bytes, whatever the number of runs: several runs of 1080p are megabytes. */
+    private static final long PREFETCH_BYTES = MemoryBudget.SMALL_HEAP ? 8L * 1024 * 1024 : 16L * 1024 * 1024;
     /** Classic output interleaves audio and video about this often, like YouTube's own MP4s. */
     private static final double CHUNK_SECONDS = 0.5;
 
@@ -83,8 +85,11 @@ final class Mp4Mux {
         long mediaTimescale;
     }
 
-    /** Above this many fragments, reading every fragment header would delay playback too much. */
-    private static final int CLASSIC_MAX_FRAGMENTS = 480;
+    /**
+     * Above this many fragments (about two hours) the classic layout is not built: its sample
+     * tables come from the header of every fragment, which takes minutes to read that long.
+     */
+    private static final int CLASSIC_MAX_FRAGMENTS = 3000;
 
     /**
      * Classic MP4 (one moov with complete sample tables, then one mdat) when the video is short
@@ -97,35 +102,18 @@ final class Mp4Mux {
     }
 
     /**
-     * Above this many fragments the classic layout costs more than it is worth: its sample
-     * tables are built from the header of every fragment, so a video of twenty-five minutes
-     * waits through hundreds of requests before its first byte, and the tables themselves are
-     * megabytes of arrays. A player that reads a fragmented file is given one instead, which
-     * needs no headers read in advance and starts at once.
-     */
-    private static final int FRAGMENTED_ABOVE = 160;
-
-    /**
-     * {@code newPlayer} says the player on the other side is one that reads a fragmented file
-     * (Android 6 and up). Short videos keep the classic layout either way: it seeks by index and
-     * plays on every player there is.
+     * Every player is given the classic layout. The fragmented one interleaves the fragments of
+     * the two tracks, and the players these apps run on do not follow that: Android 4.4's showed
+     * a black screen, and newer ones stopped the picture after its second fragment (7 s) and the
+     * sound after its first (10 s). {@code newPlayer} is kept for the cache key only.
      */
     static Plan prepareBest(JSONObject videoFormat, JSONObject audioFormat, String videoUrl,
                             String audioUrl, boolean newPlayer) throws IOException {
         Source video = loadSource(videoFormat, videoUrl, 1);
         Source audio = loadSource(audioFormat, audioUrl, 2);
         int fragments = video.pieces.size() + audio.pieces.size();
-        if (newPlayer && fragments > FRAGMENTED_ABOVE) return prepareFragmented(video, audio);
-        if (fragments <= CLASSIC_MAX_FRAGMENTS) {
-            // Reading the header of every fragment and holding the sample tables of all of them
-            // is what a phone with a small heap cannot do; it is given the single file with
-            // sound of the instance instead, which the caller falls back to.
-            if (MemoryBudget.SMALL_HEAP && fragments > CLASSIC_MAX_FRAGMENTS / 2) {
-                throw new IOException("too long to mux on a phone with " 
-                        + (Runtime.getRuntime().maxMemory() / (1024 * 1024)) + " MB of heap: "
-                        + fragments + " fragments");
-            }
-            // No fragmented fallback here: Samsung's Android 4.4 player crashes on it.
+        if (fragments <= CLASSIC_MAX_FRAGMENTS
+                && !(MemoryBudget.SMALL_HEAP && fragments > CLASSIC_MAX_FRAGMENTS / 6)) {
             return prepareClassic(video, audio);
         }
         return prepareFragmented(video, audio);
@@ -418,7 +406,12 @@ final class Mp4Mux {
         }
     }
 
-    private static final ExecutorService HEADERS = Executors.newFixedThreadPool(8, new DownloadThreads());
+    /**
+     * Fragment headers are tiny and each one is a request of its own, so their time is the
+     * instance's latency, not the link: more of them at once is what makes the classic layout
+     * start sooner (sixteen, the size of the keep-alive pool).
+     */
+    private static final ExecutorService HEADERS = Executors.newFixedThreadPool(32, new DownloadThreads());
 
     /**
      * The audio stream of a video, remuxed from its fragments into one classic MP4 (a single moov
@@ -578,7 +571,7 @@ final class Mp4Mux {
      * asking for all at once means hundreds of answers waiting in memory at the same time, which
      * on a phone of 2013 is the whole heap. The rest is asked for as the read moves along.
      */
-    private static final int HEADERS_IN_FLIGHT = 48;
+    private static final int HEADERS_IN_FLIGHT = 96;
 
     /** Builds the sample tables of a track from its fragment headers (downloaded in parallel). */
     private static List<Future<byte[]>> requestHeaders(Source source) {
@@ -627,7 +620,8 @@ final class Mp4Mux {
 
         @Override
         public byte[] call() throws Exception {
-            int guess = Math.min(piece.size, 16384);
+            // A moof of five seconds of 1080p60 is about 5 KB; a larger one is read again whole.
+            int guess = Math.min(piece.size, 8192);
             byte[] head = read(piece.url, piece.offset, piece.offset + guess - 1);
             int[] moof = findBox(head, 0, head.length, "moof");
             if (moof != null) return slice(head, moof[0], moof[1]);
@@ -836,6 +830,65 @@ final class Mp4Mux {
         return wrap(type(box, 4), body.toByteArray());
     }
 
+    /**
+     * A plan as bytes, to keep on the disk. The source URLs are left out (they expire and the
+     * instance may differ next time); {@link #readPlan} puts the current ones back by track,
+     * because the offsets of a format's file stay the same wherever it is served from.
+     */
+    static byte[] writePlan(Plan plan) throws IOException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(plan.init.length + plan.pieces.size() * 48 + 64);
+        java.io.DataOutputStream out = new java.io.DataOutputStream(bytes);
+        out.writeInt(PLAN_FORMAT);
+        out.writeBoolean(plan.classic);
+        out.writeLong(plan.length);
+        out.writeDouble(plan.durationSeconds);
+        out.writeInt(plan.init.length);
+        out.write(plan.init);
+        out.writeInt(plan.pieces.size());
+        for (Piece piece : plan.pieces) {
+            out.writeByte(piece.track);
+            out.writeLong(piece.offset);
+            out.writeInt(piece.size);
+            out.writeDouble(piece.start);
+            out.writeLong(piece.outputOffset);
+            out.writeInt(piece.sequence);
+            out.writeBoolean(piece.fragment);
+            out.writeLong(piece.runOffset);
+            out.writeInt(piece.runSize);
+        }
+        out.flush();
+        return bytes.toByteArray();
+    }
+
+    /** A plan written by {@link #writePlan}, read from {@code videoUrl} and {@code audioUrl}. */
+    static Plan readPlan(byte[] data, String videoUrl, String audioUrl) throws IOException {
+        java.io.DataInputStream in = new java.io.DataInputStream(new java.io.ByteArrayInputStream(data));
+        if (in.readInt() != PLAN_FORMAT) throw new IOException("old plan");
+        Plan plan = new Plan();
+        plan.classic = in.readBoolean();
+        plan.length = in.readLong();
+        plan.durationSeconds = in.readDouble();
+        plan.init = new byte[in.readInt()];
+        in.readFully(plan.init);
+        int count = in.readInt();
+        for (int i = 0; i < count; i++) {
+            int track = in.readByte();
+            long offset = in.readLong();
+            int size = in.readInt();
+            double start = in.readDouble();
+            Piece piece = new Piece(track, track == 1 ? videoUrl : audioUrl, offset, size, start);
+            piece.outputOffset = in.readLong();
+            piece.sequence = in.readInt();
+            piece.fragment = in.readBoolean();
+            piece.runOffset = in.readLong();
+            piece.runSize = in.readInt();
+            plan.pieces.add(piece);
+        }
+        return plan;
+    }
+
+    private static final int PLAN_FORMAT = 1;
+
     /** Muxed bytes from {@code from} on; fragments are downloaded a few ahead in the background. */
     static InputStream open(final Plan plan, final long from) {
         return new MuxInputStream(plan, from);
@@ -883,9 +936,79 @@ final class Mp4Mux {
 
         @Override
         public byte[] call() throws Exception {
-            byte[] data = read(piece.url, piece.runOffset, piece.runOffset + piece.runSize - 1);
+            byte[] data = piece.runSize > PART_BYTES && !piece.url.startsWith("mem:")
+                    ? readInParts(piece.url, piece.runOffset, piece.runSize)
+                    : read(piece.url, piece.runOffset, piece.runOffset + piece.runSize - 1);
             if (piece.fragment) patchFragment(data, piece.sequence, piece.track);
             return data;
+        }
+    }
+
+    /**
+     * Large runs are fetched as several ranges at once: the instance streams each connection at
+     * its own pace (around 150 KB/s), so one request per run of 1080p was slower than playback,
+     * while a few in parallel add up past it.
+     */
+    private static final int PART_BYTES = 512 * 1024;
+
+    private static final ExecutorService PARTS = Executors.newFixedThreadPool(8, new DownloadThreads());
+
+    /**
+     * What the link from the instance to this phone carries, in bytes per second, measured on
+     * the runs read in parts (each one as fast as the link goes); 0 until something was read.
+     * The 1080p format of the settings uses it to stay below what would stall.
+     */
+    private static volatile double linkBytesPerSecond;
+
+    static double linkBytesPerSecond() {
+        return linkBytesPerSecond;
+    }
+
+    private static void measured(int bytes, long millis) {
+        if (millis <= 0) return;
+        double speed = bytes * 1000.0 / millis;
+        double previous = linkBytesPerSecond;
+        linkBytesPerSecond = previous <= 0 ? speed : previous * 0.7 + speed * 0.3;
+    }
+
+    private static byte[] readInParts(String url, long offset, int size) throws Exception {
+        long started = System.currentTimeMillis();
+        byte[] data = new byte[size];
+        List<Future<byte[]>> parts = new ArrayList<Future<byte[]>>();
+        for (int at = 0; at < size; at += PART_BYTES) {
+            long from = offset + at;
+            long to = offset + Math.min(size, at + PART_BYTES) - 1;
+            parts.add(PARTS.submit(new RangeRead(url, from, to)));
+        }
+        try {
+            int at = 0;
+            for (Future<byte[]> part : parts) {
+                byte[] bytes = part.get();
+                System.arraycopy(bytes, 0, data, at, bytes.length);
+                at += bytes.length;
+            }
+            if (at != size) throw new IOException("short run: " + at + "/" + size);
+            measured(size, System.currentTimeMillis() - started);
+            return data;
+        } finally {
+            for (Future<byte[]> part : parts) part.cancel(true);
+        }
+    }
+
+    private static final class RangeRead implements java.util.concurrent.Callable<byte[]> {
+        private final String url;
+        private final long from;
+        private final long to;
+
+        RangeRead(String url, long from, long to) {
+            this.url = url;
+            this.from = from;
+            this.to = to;
+        }
+
+        @Override
+        public byte[] call() throws Exception {
+            return read(url, from, to);
         }
     }
 
@@ -923,18 +1046,29 @@ final class Mp4Mux {
             }
         }
 
-        /** Requests the runs of upcoming pieces, at most {@link #PREFETCH_RUNS} at a time. */
+        /**
+         * Requests the runs of upcoming pieces: at most {@link #PREFETCH_RUNS} at a time, and
+         * no more than {@link #PREFETCH_BYTES} of them, so 1080p (runs of megabytes) keeps the
+         * read-ahead within the heap while 720p and audio read as far ahead as before.
+         */
         private void fill() {
             while (!closed && queued < plan.pieces.size()) {
                 Piece piece = plan.pieces.get(queued);
                 Long key = runKey(piece);
                 if (!runs.containsKey(key)) {
                     if (runs.size() >= PREFETCH_RUNS) break;
+                    if (!runs.isEmpty() && pendingBytes + piece.runSize > PREFETCH_BYTES) break;
                     runs.put(key, DOWNLOADS.submit(new RunDownload(piece)));
+                    runBytes.put(key, Integer.valueOf(piece.runSize));
+                    pendingBytes += piece.runSize;
                 }
                 queued++;
             }
         }
+
+        /** Bytes of the runs requested and not yet let go of. */
+        private long pendingBytes;
+        private final java.util.Map<Long, Integer> runBytes = new java.util.HashMap<Long, Integer>();
 
         /** Makes piece {@code i} current; drops runs no later piece needs. */
         private boolean load(int i) {
@@ -943,7 +1077,11 @@ final class Mp4Mux {
             if (i >= plan.pieces.size()) return false;
             Piece piece = plan.pieces.get(i);
             Long key = runKey(piece);
-            if (!runs.containsKey(key)) runs.put(key, DOWNLOADS.submit(new RunDownload(piece)));
+            if (!runs.containsKey(key)) {
+                runs.put(key, DOWNLOADS.submit(new RunDownload(piece)));
+                runBytes.put(key, Integer.valueOf(piece.runSize));
+                pendingBytes += piece.runSize;
+            }
             if (queued <= i) queued = i + 1;
             try {
                 long waitStarted = System.currentTimeMillis();
@@ -964,7 +1102,14 @@ final class Mp4Mux {
             // Release runs that only earlier pieces used.
             java.util.Set<Long> needed = new java.util.HashSet<Long>();
             for (int j = i; j < queued; j++) needed.add(runKey(plan.pieces.get(j)));
-            runs.keySet().retainAll(needed);
+            java.util.Iterator<Long> kept = runs.keySet().iterator();
+            while (kept.hasNext()) {
+                Long run = kept.next();
+                if (needed.contains(run)) continue;
+                kept.remove();
+                Integer bytes = runBytes.remove(run);
+                if (bytes != null) pendingBytes -= bytes.intValue();
+            }
             fill();
             return true;
         }
