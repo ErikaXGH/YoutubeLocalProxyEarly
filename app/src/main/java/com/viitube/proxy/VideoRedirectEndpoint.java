@@ -49,65 +49,12 @@ public class VideoRedirectEndpoint implements Endpoint {
      * layout, because that is the one it was tested on.
      */
     private static boolean newPlayer(NanoHTTPD.IHTTPSession session) {
-        String agent = session.getHeaders().get("user-agent");
-        if (agent == null) return false;
-        java.util.regex.Matcher android = java.util.regex.Pattern
-                .compile("Android (\\d+)").matcher(agent);
-        return android.find() && Integer.parseInt(android.group(1)) >= 6;
-    }
-
-    private static NanoHTTPD.Response muxed(NanoHTTPD.IHTTPSession session, String videoId,
-                                            Config config) throws Exception {
-        return muxed(session, videoId, config, 720);
+        return newPlayer(session.getHeaders().get("user-agent"));
     }
 
     private static NanoHTTPD.Response muxed(NanoHTTPD.IHTTPSession session, String videoId,
                                             Config config, int maxHeight) throws Exception {
-        String planKey = videoId + "|" + maxHeight;
-        Mp4Mux.Plan plan;
-        synchronized (PLANS) {
-            plan = PLANS.get(planKey);
-        }
-        if (plan == null || System.currentTimeMillis() - plan.createdAt > PLAN_MAX_AGE_MS) {
-            long started = System.currentTimeMillis();
-            JSONObject[] formats = null;
-            String[] urls = null;
-            // An Invidious instance serves the two 720p streams itself, so they stay reachable
-            // past the first minute; YouTube's own links do not without a PO token.
-            InvidiousLookup.Streams instance = InvidiousLookup.streams(videoId, config);
-            InvidiousLookup.Pair pair = instance == null ? null : instance.pair(maxHeight);
-            if (pair != null) {
-                formats = new JSONObject[]{pair.video, pair.audio};
-                urls = new String[]{pair.videoUrl, pair.audioUrl};
-            }
-            for (JSONObject player : formats != null
-                    ? java.util.Collections.<JSONObject>emptyList()
-                    : PlayerLookup.fetchPlaybackCandidatesForMux(videoId, config)) {
-                JSONObject[] candidate = PlayerLookup.findMuxFormats(player, maxHeight);
-                if (candidate != null && endReachable(candidate[0]) && endReachable(candidate[1])) {
-                    formats = candidate;
-                    break;
-                }
-            }
-            if (formats == null) {
-                throw new java.io.IOException("YouTube serves only the first minute of the 720p "
-                        + "streams without a PO token");
-            }
-            if (urls == null) {
-                urls = new String[]{PlayerLookup.formatUrl(formats[0]),
-                        PlayerLookup.formatUrl(formats[1])};
-            }
-            plan = Mp4Mux.prepareBest(formats[0], formats[1], urls[0], urls[1],
-                    newPlayer(session));
-            android.util.Log.i("Mp4Mux", videoId + ": " + (plan.classic ? "classic" : "fragmented")
-                    + " MP4, video itag " + formats[0].optInt("itag") + " + audio itag "
-                    + formats[1].optInt("itag") + ", " + plan.pieces.size() + " chunks, "
-                    + plan.length / (1024 * 1024) + " MB, prepared in "
-                    + (System.currentTimeMillis() - started) + "ms");
-            synchronized (PLANS) {
-                PLANS.put(planKey, plan);
-            }
-        }
+        Mp4Mux.Plan plan = plan(videoId, config, maxHeight, newPlayer(session));
 
         long start = 0;
         long end = plan.length - 1;
@@ -144,10 +91,170 @@ public class VideoRedirectEndpoint implements Endpoint {
         return response;
     }
 
+    /** One lock per plan, so a warm-up and the player's own request never build it twice. */
+    private static final java.util.concurrent.ConcurrentHashMap<String, Object> PLAN_LOCKS =
+            new java.util.concurrent.ConcurrentHashMap<String, Object>();
+
+    /** Plans kept on the disk, so a video played again starts without reading its headers. */
+    private static final String PLAN_AREA = "mux_plans";
+    private static final long PLAN_DISK_BYTES = 24L * 1024 * 1024;
+
+    /**
+     * The muxed file of a video: from memory, from the disk (the plan of the same two formats,
+     * with today's links put back in), or built - which reads the header of every fragment and
+     * is what takes seconds.
+     */
+    static Mp4Mux.Plan plan(String videoId, Config config, int maxHeight, boolean newPlayer)
+            throws Exception {
+        String planKey = videoId + "|" + maxHeight + "|" + newPlayer;
+        Mp4Mux.Plan plan;
+        synchronized (PLANS) {
+            plan = PLANS.get(planKey);
+        }
+        if (plan != null && System.currentTimeMillis() - plan.createdAt <= PLAN_MAX_AGE_MS) return plan;
+        Object created = new Object();
+        Object existing = PLAN_LOCKS.putIfAbsent(planKey, created);
+        Object lock = existing != null ? existing : created;
+        synchronized (lock) {
+            try {
+                synchronized (PLANS) {
+                    plan = PLANS.get(planKey);
+                }
+                if (plan != null && System.currentTimeMillis() - plan.createdAt <= PLAN_MAX_AGE_MS) {
+                    return plan;
+                }
+                long started = System.currentTimeMillis();
+                JSONObject[] formats = null;
+                String[] urls = null;
+                // An Invidious instance serves the two streams itself, so they stay reachable
+                // past the first minute; YouTube's own links do not without a PO token.
+                InvidiousLookup.Streams instance = InvidiousLookup.streams(videoId, config);
+                InvidiousLookup.Pair pair = instance == null ? null : instance.pair(maxHeight);
+                if (pair != null) {
+                    formats = new JSONObject[]{pair.video, pair.audio};
+                    urls = new String[]{pair.videoUrl, pair.audioUrl};
+                }
+                for (JSONObject player : formats != null
+                        ? java.util.Collections.<JSONObject>emptyList()
+                        : PlayerLookup.fetchPlaybackCandidatesForMux(videoId, config)) {
+                    JSONObject[] candidate = PlayerLookup.findMuxFormats(player, maxHeight);
+                    if (candidate != null && endReachable(candidate[0]) && endReachable(candidate[1])) {
+                        formats = candidate;
+                        break;
+                    }
+                }
+                if (formats == null) {
+                    throw new java.io.IOException("YouTube serves only the first minute of the "
+                            + maxHeight + "p streams without a PO token");
+                }
+                if (urls == null) {
+                    urls = new String[]{PlayerLookup.formatUrl(formats[0]),
+                            PlayerLookup.formatUrl(formats[1])};
+                }
+                // The same two files (format and size) always give the same plan.
+                String diskKey = videoId + "_" + formats[0].optInt("itag") + "_" + formats[1].optInt("itag")
+                        + "_" + formats[0].optString("contentLength", "0") + "_"
+                        + formats[1].optString("contentLength", "0") + (newPlayer ? "_n" : "_o");
+                byte[] stored = DiskCache.get(PLAN_AREA, diskKey);
+                if (stored != null) {
+                    try {
+                        plan = Mp4Mux.readPlan(stored, urls[0], urls[1]);
+                    } catch (java.io.IOException e) {
+                        plan = null;
+                    }
+                }
+                boolean fromDisk = plan != null;
+                if (plan == null) {
+                    plan = Mp4Mux.prepareBest(formats[0], formats[1], urls[0], urls[1], newPlayer);
+                    try {
+                        DiskCache.put(PLAN_AREA, diskKey, Mp4Mux.writePlan(plan), PLAN_DISK_BYTES);
+                    } catch (java.io.IOException e) {
+                        android.util.Log.i("Mp4Mux", "plan not kept: " + e);
+                    }
+                }
+                android.util.Log.i("Mp4Mux", videoId + ": " + (plan.classic ? "classic" : "fragmented")
+                        + " MP4, video itag " + formats[0].optInt("itag") + " + audio itag "
+                        + formats[1].optInt("itag") + ", " + plan.pieces.size() + " chunks, "
+                        + plan.length / (1024 * 1024) + " MB, " + (fromDisk ? "from disk" : "prepared")
+                        + " in " + (System.currentTimeMillis() - started) + "ms");
+                synchronized (PLANS) {
+                    PLANS.put(planKey, plan);
+                }
+                return plan;
+            } finally {
+                PLAN_LOCKS.remove(planKey);
+            }
+        }
+    }
+
+    /** Builds plans ahead of the player, one at a time and at low priority. */
+    private static final java.util.concurrent.ThreadPoolExecutor WARMERS =
+            new java.util.concurrent.ThreadPoolExecutor(1, 1, 30, java.util.concurrent.TimeUnit.SECONDS,
+                    new java.util.concurrent.LinkedBlockingQueue<Runnable>(2),
+                    new java.util.concurrent.ThreadPoolExecutor.DiscardOldestPolicy());
+    static {
+        WARMERS.allowCoreThreadTimeOut(true);
+    }
+
+    /**
+     * Starts building the muxed file of a video the app is about to play (its player request
+     * came in), so the stream request that follows finds it ready or half done.
+     */
+    static void warm(String videoId, Config config, int maxHeight, boolean newPlayer) {
+        WARMERS.execute(new Warm(videoId, config, maxHeight, newPlayer));
+    }
+
+    private static final class Warm implements Runnable {
+        private final String videoId;
+        private final Config config;
+        private final int maxHeight;
+        private final boolean newPlayer;
+
+        Warm(String videoId, Config config, int maxHeight, boolean newPlayer) {
+            this.videoId = videoId;
+            this.config = config;
+            this.maxHeight = maxHeight;
+            this.newPlayer = newPlayer;
+        }
+
+        @Override
+        public void run() {
+            try {
+                plan(videoId, config, maxHeight, newPlayer);
+            } catch (Exception e) {
+                android.util.Log.i("Mp4Mux", "warm-up of " + videoId + " failed: " + e);
+            }
+        }
+    }
+
+    /** Whether the app on this phone takes 720p when it is offered 1080p (see handle). */
+    static volatile boolean appCapsAt720;
+
+    /**
+     * The quality the app last picked itself from a "select" list (0 until it has): it keeps
+     * picking the same one, so the warm-up of the next video builds that one ahead.
+     */
+    static volatile int lastSelected;
+
+    /** The height a playback format of the settings muxes up to. */
+    static int defaultHeight(String mode) {
+        return "mux1080".equals(mode) ? 1080 : 720;
+    }
+
+    /** Whether a player on this user agent reads a fragmented file (Android 6 and up). */
+    static boolean newPlayer(String agent) {
+        if (agent == null) return false;
+        java.util.regex.Matcher android = ANDROID_VERSION.matcher(agent);
+        return android.find() && Integer.parseInt(android.group(1)) >= 6;
+    }
+
+    private static final java.util.regex.Pattern ANDROID_VERSION = java.util.regex.Pattern.compile("Android (\\d+)");
+
     @Override
     public NanoHTTPD.Response handle(NanoHTTPD.IHTTPSession session, String[] params,
                                       Config config, Context context) throws Exception {
         Map<String, String> qs = session.getParms();
+        DiskCache.init(context);
         String videoId = params.length > 0 ? params[0] : qs.get("v");
         if (videoId == null) {
             videoId = qs.get("video_id");
@@ -167,6 +274,10 @@ public class VideoRedirectEndpoint implements Endpoint {
         // A request can name the quality it wants: "q" for the links this proxy writes, "fmt"
         // for the legacy clients, which ask for a format number.
         int wanted = requestedHeight(qs);
+        // Offered 1080p and 720p, the app asked for 720p: it does not trust this phone with
+        // 1080p, so the warm-up builds 720p from now on.
+        if ("mux1080".equals(mode) && wanted == 720) appCapsAt720 = true;
+        if ("select".equals(mode) && wanted > 0) lastSelected = wanted;
         if (wanted == 360) {
             // 360p plays straight from YouTube, with no instance in between.
             JSONObject direct = PlayerLookup.fetchPlaybackPlayer(videoId, config, "360p");
@@ -178,19 +289,31 @@ public class VideoRedirectEndpoint implements Endpoint {
         if ((wanted > 360 || (wanted == 0 && !"360p".equals(mode)))
                 && InvidiousLookup.hasInstance(config)) {
             try {
-                return muxed(session, videoId, config, wanted > 0 ? wanted : 720);
+                return muxed(session, videoId, config, wanted > 0 ? wanted : defaultHeight(mode));
             } catch (Exception e) {
-                android.util.Log.w("VideoRedirect", "No 720p from the Invidious instance for "
-                        + videoId + ": " + e);
+                android.util.Log.w("VideoRedirect", "No " + (wanted > 0 ? wanted : defaultHeight(mode))
+                        + "p from the Invidious instance for " + videoId + ": " + e);
+                // Its links for this video failed: the next request asks the instances again.
+                InvidiousLookup.forget(videoId);
+                synchronized (PLANS) {
+                    java.util.Iterator<String> keys = PLANS.keySet().iterator();
+                    while (keys.hasNext()) {
+                        if (keys.next().startsWith(videoId + "|")) keys.remove();
+                    }
+                }
             }
+            // 360p with sound instead: YouTube's own file first, which needs no instance.
+            String direct = PlayerLookup.findProgressive360pUrl(
+                    PlayerLookup.fetchPlaybackPlayer(videoId, config, "360p"));
+            if (direct != null) return redirectTo(direct);
             String single = InvidiousLookup.progressiveUrl(videoId, config);
             if (single != null) return redirectTo(single);
         }
-        if ("mux720".equals(mode)) {
+        if ("mux720".equals(mode) || "mux1080".equals(mode)) {
             try {
-                return muxed(session, videoId, config);
+                return muxed(session, videoId, config, defaultHeight(mode));
             } catch (Exception e) {
-                android.util.Log.w("VideoRedirect", "720p mux failed for " + videoId
+                android.util.Log.w("VideoRedirect", mode + " mux failed for " + videoId
                         + "; falling back to 360p: " + e);
                 mode = "360p";
             }

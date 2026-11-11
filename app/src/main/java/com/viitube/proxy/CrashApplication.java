@@ -7,6 +7,7 @@ public class CrashApplication extends Application {
     @Override
     public void onCreate() {
         super.onCreate();
+        YouTubeAuth.init(this);
         // A feed fans out to ten lookups at once; with the five kept connections of the default
         // every one past that closes its connection and pays for a new TLS handshake.
         System.setProperty("http.keepAlive", "true");

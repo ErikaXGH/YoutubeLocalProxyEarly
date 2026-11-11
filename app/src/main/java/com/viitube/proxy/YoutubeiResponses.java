@@ -1,6 +1,7 @@
 package com.viitube.proxy;
 
 import com.viitube.proxy.proto.AndroidFullNextProto;
+import com.viitube.proxy.proto.LikeProto;
 import com.viitube.proxy.proto.AndroidGuideProto;
 import com.viitube.proxy.proto.AndroidPlayerProto;
 import com.viitube.proxy.proto.AndroidResolveProto;
@@ -35,6 +36,8 @@ final class YoutubeiResponses {
     private static final int ICON_TAB_TRENDING = 67;
     private static final int ICON_TAB_ACCOUNT = 69;
     private static final int ICON_LIKE = 160;
+    private static final int ICON_LIKE_SELECTED = 301;
+    private static final int ICON_DISLIKE_SELECTED = 302;
     /** SHARE_ARROW: the curved arrow (ic_share); SHARE (48) is the three dots instead. */
     private static final int ICON_SHARE = 100;
     private static final int ICON_ADDTO = 46;
@@ -68,6 +71,32 @@ final class YoutubeiResponses {
     /** One of the fixed labels the proxy writes, in the request's language (English otherwise). */
     static String tr(String english) {
         if (!isPolish()) return english;
+        if ("Sort by".equals(english)) return "Sortuj według";
+        if ("Upload".equals(english)) return "Prześlij";
+        if ("Save to playlist".equals(english)) return "Zapisz na playliście";
+        if ("Play all".equals(english)) return "Odtwórz wszystko";
+        if ("Videos only".equals(english)) return "Tylko filmy";
+        if ("Music".equals(english)) return "Muzyka";
+        if ("Subscriptions".equals(english)) return "Subskrypcje";
+        if ("Gaming".equals(english)) return "Gry";
+        if ("News".equals(english)) return "Wiadomości";
+        if ("Movies".equals(english)) return "Filmy";
+        if ("Top comments".equals(english)) return "Najlepsze komentarze";
+        if ("Add a public comment...".equals(english)) return "Dodaj publiczny komentarz...";
+        if ("Newest first".equals(english)) return "Najpierw najnowsze";
+        if ("Playlists".equals(english)) return "Playlisty";
+        if ("New playlist".equals(english)) return "Nowa playlista";
+        if ("Watch later".equals(english)) return "Do obejrzenia";
+        if ("Liked videos".equals(english)) return "Filmy, które mi się podobają";
+        if ("Search".equals(english)) return "Szukaj";
+        if ("My channel".equals(english)) return "Mój kanał";
+        if ("Switch account".equals(english)) return "Przełącz konto";
+        if ("Settings".equals(english)) return "Ustawienia";
+        if ("Sign out".equals(english)) return "Wyloguj się";
+        if ("Uploads".equals(english)) return "Przesłane";
+        if ("Most popular".equals(english)) return "Najpopularniejsze";
+        if ("Date added (oldest)".equals(english)) return "Data dodania (najstarsze)";
+        if ("Date added (newest)".equals(english)) return "Data dodania (najnowsze)";
         if ("views".equals(english)) return "wyświetleń";
         if ("view".equals(english)) return "wyświetlenie";
         if ("Up next".equals(english)) return "Następny";
@@ -78,8 +107,8 @@ final class YoutubeiResponses {
         if ("Share".equals(english)) return "Udostępnij";
         if ("Download".equals(english)) return "Pobierz";
         if ("likes".equals(english)) return "polubień";
-        if ("replies".equals(english)) return "odpowiedzi";
         if ("About".equals(english)) return "Informacje";
+        if ("Channels".equals(english)) return "Kanały";
         if ("dislikes".equals(english)) return "nie lubi\u0119";
         if ("comments".equals(english)) return "komentarzy";
         return english;
@@ -184,9 +213,7 @@ final class YoutubeiResponses {
 
     private static long parseAtomDate(String atom) {
         try {
-            SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
-            format.setTimeZone(TimeZone.getTimeZone("UTC"));
-            return format.parse(atom).getTime();
+            return InnertubeEndpoint.ATOM_DATE.get().parse(atom).getTime();
         } catch (Exception e) {
             return 0;
         }
@@ -203,6 +230,15 @@ final class YoutubeiResponses {
 
     private static String avatarOrDefault(String avatar) {
         return avatar == null || avatar.isEmpty() ? DEFAULT_AVATAR : avatar;
+    }
+
+    /**
+     * The same picture at 240 px: YouTube's avatar addresses carry their size ("=s88-c-k-..." or
+     * "/s88-c-k/"), and the channel header otherwise scales up an 88 px one.
+     */
+    static String largeAvatar(String url) {
+        if (url == null) return "";
+        return url.replaceFirst("([=/])s\\d+(-|$|/)", "$1s240$2");
     }
 
     // ------------------------------------------------------------------ browse (video_list_proto)
@@ -359,6 +395,33 @@ final class YoutubeiResponses {
         return new VideoListProto.Root().setContinuation(new VideoListProto.Root.ContinuationContents()
                 .addSectionListContinuation(sectionList(videoSection(videos, authorAvatar, now),
                         continuationToken))).toByteArray();
+    }
+
+    /** Sort parameter of a channel browse: opens the Videos tab in that order (see YoutubeiEndpoint). */
+    static final String SORT_PARAMS = "vtpsort:";
+
+    /**
+     * The Videos tab's "Sort by" menu: newest first, most popular, oldest first; each choice opens
+     * the channel again with its Videos tab sorted that way.
+     */
+    static com.viitube.proxy.proto.SortMenuProto sortMenu(String channelId, int selected) {
+        com.viitube.proxy.proto.ProtoMessage[] endpoints = new com.viitube.proxy.proto.ProtoMessage[3];
+        for (int i = 0; i < 3; i++) endpoints[i] = browseNavigation(channelId, SORT_PARAMS + i, "/channel/" + channelId);
+        return new com.viitube.proxy.proto.SortMenuProto(tr("Sort by"),
+                new String[]{tr("Date added (newest)"), tr("Most popular"), tr("Date added (oldest)")},
+                endpoints, selected);
+    }
+
+    /** Videos for a reloaded or continued Videos tab, with the sort menu when it was reloaded. */
+    static byte[] browseVideosContinuation(List<InnertubeEndpoint.Video> videos, String authorAvatar,
+                                           long now, String continuationToken,
+                                           com.viitube.proxy.proto.ProtoMessage sortMenu) {
+        VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer
+                .ContentEntry.ContentData data = sectionList(videoSection(videos, authorAvatar, now),
+                continuationToken);
+        if (sortMenu != null) data.getC(0).getSection(0).setHeader(sortMenu);
+        return new VideoListProto.Root().setContinuation(new VideoListProto.Root.ContinuationContents()
+                .addSectionListContinuation(data)).toByteArray();
     }
 
     /** More posts of a channel's Community tab, as the answer to a continuation request. */
@@ -546,6 +609,102 @@ final class YoutubeiResponses {
         return finishBrowse(browseRoot(), tabs, textHeader(title));
     }
 
+    // Icons of the Library rows (IconType numbers from the app's icon table, gsu).
+    /** The blue "+" the proxy draws (IconEndpoint): the app's own "+" icons are white. */
+    private static final String ADD_ICON_URL = "http://127.0.0.1:8080/proxy/icon/add.png";
+    private static final int ICON_WATCH_LATER = 3;
+    private static final int ICON_LIKES_PLAYLIST = 16;
+    /** NavigationEndpoint field of createPlaylistServiceEndpoint (acmx): opens the app's dialog. */
+    private static final int CREATE_PLAYLIST_ENDPOINT = 85650004;
+
+    // The Library rows are compactLinkRenderers (acgl: icon 1, thumbnail 2, title 3, endpoint 4,
+    // subtitle 13).
+
+    /** FormattedString addp {runs = 1 {text = 1, textColor = 8 (ARGB)}}. */
+    private static byte[] coloredText(String text, int argb) {
+        com.viitube.proxy.proto.ProtoWriter run = new com.viitube.proxy.proto.ProtoWriter();  // afmq
+        run.writeString(1, text);
+        run.writeUInt32(8, argb);
+        com.viitube.proxy.proto.ProtoWriter string = new com.viitube.proxy.proto.ProtoWriter();
+        string.writeBytes(1, run.toByteArray());
+        return string.toByteArray();
+    }
+
+    /** One Library row: {id, title, count, thumbnail}, with an icon or else the thumbnail. */
+    private static VideoListProto.ItemSectionRenderer.IcsContents libraryRow(String[] playlist,
+                                                                           String title, int icon) {
+        VideoListProto.AccountTabLink link = new VideoListProto.AccountTabLink()
+                .addText(browseRuns(title))
+                .setSubtitle(browseRuns(videoCount(playlist[2])))
+                .setNavigation(browseNavigation("VL" + playlist[0], null, null));
+        if (icon != 0) {
+            link.setIconData(new VideoListProto.AccountTabLink.Icon().setIconType(icon));
+        } else {
+            link.setImage(browseThumbnails(playlist[3].isEmpty() ? DEFAULT_PLAYLIST_THUMB : playlist[3],
+                    120, 90));
+        }
+        return new VideoListProto.ItemSectionRenderer.IcsContents().addAccountLink(link);
+    }
+
+    private static final String DEFAULT_PLAYLIST_THUMB = "https://i.ytimg.com/img/no_thumbnail.jpg";
+
+    /** "12 videos", "No videos"; Polish with its plural forms. */
+    static String videoCount(String count) {
+        String digits = count.replaceAll("[^0-9]", "");
+        if (digits.isEmpty() || digits.equals("0")) return isPolish() ? "Brak filmów" : "No videos";
+        long n;
+        try {
+            n = Long.parseLong(digits);
+        } catch (NumberFormatException e) {
+            return count;
+        }
+        String number = String.format(Locale.US, "%,d", n);
+        if (!isPolish()) return number + (n == 1 ? " video" : " videos");
+        number = number.replace(',', ' ');
+        if (n == 1) return "1 film";
+        long tens = n % 100;
+        long ones = n % 10;
+        if (ones >= 2 && ones <= 4 && (tens < 12 || tens > 14)) return number + " filmy";
+        return number + " filmów";
+    }
+
+    /**
+     * FElibrary for the signed-in account, as 12.x drew it: one "Playlists" section with "New
+     * playlist" (blue, the app's own create dialog), Watch later and Liked videos with their
+     * icons, then the account's playlists as compact rows (thumbnail, title, count).
+     */
+    static byte[] library(List<String[]> playlists) {
+        if (playlists.isEmpty()) return library();
+        String[] watchLater = null;
+        String[] liked = null;
+        for (String[] playlist : playlists) {
+            if (playlist[0].equals("WL")) watchLater = playlist;
+            else if (playlist[0].equals("LL")) liked = playlist;
+        }
+        VideoListProto.ItemSectionRenderer section = new VideoListProto.ItemSectionRenderer();
+        section.setHeader(new com.viitube.proxy.proto.SortMenuProto.TitleHeader(tr("Playlists")));
+        com.viitube.proxy.proto.ProtoWriter create = new com.viitube.proxy.proto.ProtoWriter(); // acdz
+        create.writeBytes(CREATE_PLAYLIST_ENDPOINT, new byte[0]);
+        section.addIcsContent(new VideoListProto.ItemSectionRenderer.IcsContents().addAccountLink(
+                new VideoListProto.AccountTabLink()
+                        .setImage(browseThumbnails(ADD_ICON_URL, 96, 96))
+                        .setRawTitle(coloredText(tr("New playlist"), IconEndpoint.BLUE))
+                        .setRawNavigation(create.toByteArray())));
+        if (watchLater != null) section.addIcsContent(libraryRow(watchLater, tr("Watch later"), ICON_WATCH_LATER));
+        if (liked != null) section.addIcsContent(libraryRow(liked, tr("Liked videos"), ICON_LIKES_PLAYLIST));
+        for (String[] playlist : playlists) {
+            if (playlist == watchLater || playlist == liked) continue;
+            section.addIcsContent(libraryRow(playlist, playlist[1], 0));
+        }
+        VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer
+                .ContentEntry.ContentData.ContentActualData content = tabContent();
+        content.addSection(section);
+        VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer tabs =
+                new VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer()
+                        .addTab(tab("FElibrary", tr("Library"), true, 0, content));
+        return finishBrowse(browseRoot(), tabs, textHeader(tr("Library")));
+    }
+
     /**
      * FElibrary, the third item of the bottom bar. Watch history, Watch later and playlists need
      * an account, so the page links to the feeds this proxy does serve.
@@ -570,7 +729,13 @@ final class YoutubeiResponses {
     /** FEaccount. Signing in is not supported. */
     static byte[] account() {
         List<VideoListProto.AccountTabLink> links = new java.util.ArrayList<VideoListProto.AccountTabLink>();
-        links.add(browseLink("Signing in is not available", ICON_TAB_ACCOUNT, null));
+        if (YouTubeAuth.signedIn()) {
+            String name = YouTubeAuth.accountName();
+            links.add(browseLink(name.isEmpty() ? "Signed in" : name, ICON_TAB_ACCOUNT, null));
+            links.add(browseLink("Subscriptions", ICON_PIVOT_SUBSCRIPTIONS, "FEsubscriptions"));
+        } else {
+            links.add(browseLink("Signing in is not available", ICON_TAB_ACCOUNT, null));
+        }
         links.add(browseLink("Popular on YouTube", ICON_TAB_TRENDING, "FEtrending"));
         links.add(browseLink("Music", ICON_MIX, "FEmusic"));
         return linkPage("FEaccount", "Account", links);
@@ -585,10 +750,51 @@ final class YoutubeiResponses {
     /** With {@code feedCards} the videos are the wide cards of the 2017 apps' feeds. */
     static byte[] videoList(String identifier, String title, List<InnertubeEndpoint.Video> videos,
                             long now, boolean feedCards, java.util.Map<String, String> avatars) {
+        return videoList(identifier, title, videos, now, feedCards, avatars, null);
+    }
+
+    /** The same, with the bar of the account's channels over the list (the Subscriptions feed). */
+    static byte[] videoList(String identifier, String title, List<InnertubeEndpoint.Video> videos,
+                            long now, boolean feedCards, java.util.Map<String, String> avatars,
+                            List<String[]> channelBar) {
+        com.viitube.proxy.proto.ChannelBarProto bar = null;
+        com.viitube.proxy.proto.ProtoMessage header = null;
+        if (channelBar != null && !channelBar.isEmpty()) {
+            List<com.viitube.proxy.proto.ChannelBarProto.Channel> channels =
+                    new java.util.ArrayList<com.viitube.proxy.proto.ChannelBarProto.Channel>();
+            for (String[] channel : channelBar) {
+                channels.add(new com.viitube.proxy.proto.ChannelBarProto.Channel(
+                        channel[0], channel[1], avatarOrDefault(channel[2])));
+            }
+            // The Subscriptions feed of 12.x: the channels, "ALL" at the end of them (the list
+            // of every subscription) and "Videos only" over the feed.
+            bar = new com.viitube.proxy.proto.ChannelBarProto(channels).withAll(ALL_CHANNELS);
+            String label = tr("Videos only");
+            header = new com.viitube.proxy.proto.SortMenuProto(label, new String[]{label},
+                    new com.viitube.proxy.proto.ProtoMessage[]{browseNavigation("FEsubscriptions", null, null)},
+                    0).withoutIcon().header(label);
+        }
+        return videoList(identifier, title, videos, now, feedCards, avatars, bar, header);
+    }
+
+    /** The browse id of the list of every subscribed channel (the bar's "ALL"). */
+    static final String ALL_CHANNELS = "FEchannels";
+
+    /** With a bar over the list (channels, categories) and a header on its first section. */
+    static byte[] videoList(String identifier, String title, List<InnertubeEndpoint.Video> videos,
+                            long now, boolean feedCards, java.util.Map<String, String> avatars,
+                            com.viitube.proxy.proto.ChannelBarProto bar,
+                            com.viitube.proxy.proto.ProtoMessage sectionHeader) {
+        VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs tab =
+                tab(identifier, title, true, 0, videoSections(videos, now, feedCards, avatars));
+        VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer
+                .ContentEntry.ContentData data = tab.getTabRender(0).getContentsEntry(0).getContentArray(0);
+        if (bar != null) data.setSubMenu(bar);
+        if (sectionHeader != null && data.getCCount() > 0 && data.getC(0).getSectionCount() > 0) {
+            data.getC(0).getSection(0).setHeader(sectionHeader);
+        }
         VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer tabs =
-                new VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer()
-                        .addTab(tab(identifier, title, true, 0,
-                                videoSections(videos, now, feedCards, avatars)));
+                new VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer().addTab(tab);
         return finishBrowse(browseRoot(), tabs, textHeader(title));
     }
 
@@ -600,13 +806,24 @@ final class YoutubeiResponses {
                           List<ChannelEndpoint.PlaylistSummary> playlists, long now,
                           String uploadsToken, List<ChannelEndpoint.Post> posts,
                           int clientMajorVersion, String communityToken, String playlistsToken) {
+        return channel(info, uploads, playlists, now, uploadsToken, posts, clientMajorVersion,
+                communityToken, playlistsToken, -1);
+    }
+
+    /** With {@code videosSort} 0-2 the Videos tab opens selected, sorted as the menu says. */
+    static byte[] channel(ChannelEndpoint.ChannelInfo info, List<InnertubeEndpoint.Video> uploads,
+                          List<ChannelEndpoint.PlaylistSummary> playlists, long now,
+                          String uploadsToken, List<ChannelEndpoint.Post> posts,
+                          int clientMajorVersion, String communityToken, String playlistsToken,
+                          int videosSort) {
         String channelId = info.id;
         String name = info.name.isEmpty() ? channelId : info.name;
         VideoListProto.Root root = browseRoot();
 
         VideoListProto.SubscribeButtonData.SubContents subscribe = new VideoListProto.SubscribeButtonData.SubContents()
                 .setChannelId(channelId)
-                .setInt3(0).setInt4(1).setInt6(0).setInt8(0)
+                // Field 3 is "subscribed" (subscribeButtonRenderer afmv.c).
+                .setInt3(AccountActions.isSubscribed(channelId) ? 1 : 0).setInt4(1).setInt6(0).setInt8(0)
                 .addSubscribeButton(browseRunsBold("SUBSCRIBE"))
                 .addSubscribedLabel(browseRunsBold("SUBSCRIBED"))
                 .addSubscribeLabel(browseRunsBold("SUBSCRIBE"))
@@ -622,9 +839,11 @@ final class YoutubeiResponses {
         VideoListProto.Root.HeaderRender.C4Header c4 = new VideoListProto.Root.HeaderRender.C4Header()
                 .setChannelId(channelId)
                 .setChannelName(name)
-                .addAvatars(browseThumbnails(avatarOrDefault(info.avatar), 160, 160))
-                .addSubscribeCount(browseRuns(subscriberText(info.subscribers)))
-                .addSubscribeButton(new VideoListProto.SubscribeButtonData().addContent(subscribe));
+                .addAvatars(browseThumbnails(largeAvatar(avatarOrDefault(info.avatar)), 240, 240))
+                .addSubscribeCount(browseRuns(subscriberText(info.subscribers)));
+        // No subscribe button on the account's own channel.
+        boolean own = YouTubeAuth.signedIn() && channelId.equals(YouTubeAuth.ownChannel());
+        if (!own) c4.addSubscribeButton(new VideoListProto.SubscribeButtonData().addContent(subscribe));
         if (!info.banner.isEmpty()) c4.addMobileBanners(browseThumbnails(info.banner, 1060, 175));
         VideoListProto.Root.HeaderRender header = new VideoListProto.Root.HeaderRender().addChannelHeader(c4);
 
@@ -632,7 +851,56 @@ final class YoutubeiResponses {
                 new VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer();
         VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer
                 .ContentEntry.ContentData.ContentActualData home = tabContent();
-        if (!uploads.isEmpty()) {
+        // youtube.com's Home tab: the spotlight video, then its shelves. Each goes in a content
+        // entry of its own (two in one entry merge into a single message).
+        List<VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer
+                .ContentEntry.ContentData.ContentActualData> homeParts =
+                new java.util.ArrayList<VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer
+                        .Tabs.TabRenderer.ContentEntry.ContentData.ContentActualData>();
+        if (info.spotlight != null) {
+            VideoListProto.ItemSectionRenderer spotlight = new VideoListProto.ItemSectionRenderer();
+            VideoListProto.ItemSectionRenderer.IcsContents item = new VideoListProto.ItemSectionRenderer.IcsContents();
+            if (clientMajorVersion >= PIVOT_BAR_VERSION) {
+                item.addFeedVideo(browseFeedVideo(info.spotlight, info.avatar, now));
+            } else {
+                item.addVideo(browseVideo(info.spotlight, info.avatar, now));
+            }
+            spotlight.addIcsContent(item);
+            VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer
+                    .ContentEntry.ContentData.ContentActualData part = tabContent();
+            part.addSection(spotlight);
+            homeParts.add(part);
+        }
+        List<String[]> featuredChannels = new java.util.ArrayList<String[]>();
+        for (ChannelEndpoint.HomeShelf shelf : info.shelves) {
+            VideoListProto.ShelfRenderer.Contents.ShelfContents shelfContents =
+                    new VideoListProto.ShelfRenderer.Contents.ShelfContents();
+            for (int i = 0; i < shelf.videos.size() && i < 12; i++) {
+                shelfContents.addContent(new VideoListProto.ShelfRenderer.Contents.ShelfContents.ShelfContentsContents()
+                        .addVideo(browseVideo(shelf.videos.get(i), info.avatar, now)));
+            }
+            for (int i = 0; i < shelf.playlists.size() && i < 12; i++) {
+                ChannelEndpoint.PlaylistSummary playlist = shelf.playlists.get(i);
+                shelfContents.addContent(new VideoListProto.ShelfRenderer.Contents.ShelfContents.ShelfContentsContents()
+                        .addPlaylist(browsePlaylist(playlist.id, playlist.title, name, channelId,
+                                playlist.count, playlist.firstVideoId, playlist.thumbnail)));
+            }
+            for (String[] channel : shelf.channels) {
+                featuredChannels.add(channel);
+                shelfContents.addContent(new VideoListProto.ShelfRenderer.Contents.ShelfContents.ShelfContentsContents()
+                        .addChannel(browseChannel(channel)));
+            }
+            VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer
+                    .ContentEntry.ContentData.ContentActualData part = tabContent();
+            part.addShelf(new VideoListProto.ShelfRenderer()
+                    .setHeader(new VideoListProto.ShelfRenderer.ShelfHeader().addContent(
+                            new VideoListProto.ShelfRenderer.ShelfHeader.Contents().setShelfName(shelf.title)))
+                    .setContent(new VideoListProto.ShelfRenderer.Contents().setShelfContent(shelfContents)));
+            homeParts.add(part);
+        }
+        if (!homeParts.isEmpty()) {
+            home = homeParts.remove(0);
+        } else if (!uploads.isEmpty()) {
             VideoListProto.ShelfRenderer.Contents.ShelfContents shelfContents =
                     new VideoListProto.ShelfRenderer.Contents.ShelfContents();
             for (int i = 0; i < uploads.size() && i < 10; i++) {
@@ -644,11 +912,20 @@ final class YoutubeiResponses {
                             new VideoListProto.ShelfRenderer.ShelfHeader.Contents().setShelfName("Latest uploads")))
                     .setContent(new VideoListProto.ShelfRenderer.Contents().setShelfContent(shelfContents)));
         }
-        tabs.addTab(tab("Home", "Home", true, 0, home));
+        VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs homeTab =
+                tab("Home", "Home", videosSort < 0, 0, home);
+        for (VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer
+                .ContentEntry.ContentData.ContentActualData part : homeParts) {
+            homeTab.getTabRender(0).getContentsEntry(0).getContentArray(0).addC(part);
+        }
+        tabs.addTab(homeTab);
 
         if (!uploads.isEmpty()) {
-            tabs.addTab(tab("Videos", "Videos", false, 0,
-                    videoSection(uploads, info.avatar, now), uploadsToken));
+            VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs videos =
+                    tab("Videos", "Videos", videosSort >= 0, 0, videoSection(uploads, info.avatar, now), uploadsToken);
+            videos.getTabRender(0).getContentsEntry(0).getContentArray(0).getC(0).getSection(0)
+                    .setHeader(sortMenu(channelId, Math.max(0, videosSort)).header(tr("Uploads")));
+            tabs.addTab(videos);
         }
 
         if (clientMajorVersion >= COMMUNITY_TAB_VERSION && !posts.isEmpty()) {
@@ -704,7 +981,53 @@ final class YoutubeiResponses {
             content.addSection(section);
             tabs.addTab(tab("Playlists", "Playlists", false, 0, content, playlistsToken));
         }
+
+        // Channels: the channels the Home tab features (youtube.com dropped the tab itself).
+        if (!featuredChannels.isEmpty()) {
+            VideoListProto.ItemSectionRenderer section = new VideoListProto.ItemSectionRenderer();
+            java.util.Set<String> seen = new java.util.HashSet<String>();
+            for (String[] channel : featuredChannels) {
+                if (!seen.add(channel[0])) continue;
+                section.addIcsContent(new VideoListProto.ItemSectionRenderer.IcsContents()
+                        .addChannel(browseChannel(channel)));
+            }
+            VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer
+                    .ContentEntry.ContentData.ContentActualData content = tabContent();
+            content.addSection(section);
+            tabs.addTab(tab("Channels", tr("Channels"), false, 0, content));
+        }
         return finishBrowse(root, tabs, header);
+    }
+
+    /** A page listing channels ({id, name, avatar}), as cards opening them. */
+    static byte[] channelList(String identifier, String title, List<String[]> channels) {
+        VideoListProto.ItemSectionRenderer section = new VideoListProto.ItemSectionRenderer();
+        for (String[] channel : channels) {
+            section.addIcsContent(new VideoListProto.ItemSectionRenderer.IcsContents().addChannel(
+                    browseChannel(new String[]{channel[0], channel[1], channel[2], ""})));
+        }
+        VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer
+                .ContentEntry.ContentData.ContentActualData content = tabContent();
+        content.addSection(section);
+        VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer tabs =
+                new VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer()
+                        .addTab(tab(identifier, title, true, 0, content));
+        return finishBrowse(browseRoot(), tabs, textHeader(title));
+    }
+
+    /** A channel card from {id, name, avatar, subscribers}; tapping it opens the channel. */
+    private static VideoListProto.ChannelRenderer browseChannel(String[] channel) {
+        VideoListProto.ChannelRenderer renderer = new VideoListProto.ChannelRenderer()
+                .setId(channel[0])
+                .setName(browseRuns(channel[1]))
+                // The channel card (acgf, hlu) shows its title from field 9.
+                .setName2(browseRuns(channel[1]))
+                .setAvatar(browseThumbnails(avatarOrDefault(channel[2]), 88, 88))
+                .setAvatar2(browseThumbnails(avatarOrDefault(channel[2]), 176, 176))
+                .setNavigation(browseNavigation(channel[0], null, "/channel/" + channel[0]));
+        String subscribers = subscriberText(channel[3]);
+        if (!subscribers.isEmpty()) renderer.setSubCount(browseRuns(subscribers));
+        return renderer;
     }
 
     /**
@@ -717,34 +1040,253 @@ final class YoutubeiResponses {
                 .setPostId(post.id)
                 .setAuthor(browseRuns(post.author))
                 .setAuthorThumbnail(browseThumbnails(avatarOrDefault(post.avatar), 88, 88))
-                .setContent(browseRuns(post.text));
+                .setContent(post.runs.isEmpty() ? browseRuns(post.text) : postRuns(post.runs));
         if (!post.authorId.isEmpty()) {
             renderer.setAuthorEndpoint(browseNavigation(post.authorId, null, null));
         }
-        StringBuilder line = new StringBuilder();
-        if (!post.published.isEmpty()) line.append(post.published);
-        // Likes, dislikes and comments, the counts the post's line showed. YouTube no longer
-        // publishes dislikes and Return YouTube Dislike only knows videos, so that one is 0.
-        if (line.length() > 0) line.append(" \u00b7 ");
-        line.append(post.likes.isEmpty() ? "0" : post.likes).append(' ').append(tr("likes"));
-        line.append(" \u00b7 0 ").append(tr("dislikes"));
-        if (!post.comments.isEmpty()) {
-            line.append(" \u00b7 ").append(post.comments).append(' ').append(tr("comments"));
+        boolean toolbar = !post.likeAction.isEmpty() && !post.dislikeAction.isEmpty();
+        if (toolbar) {
+            // The comment view's own row: like and dislike toggles with the like count next to
+            // them, and the comment count on the reply button.
+            renderer.setPublishedTime(browseRuns(post.published));
+            renderer.addRawField(10, postActionButtons(post));
+            renderer.addRawField(28, formattedBytes(post.likes.isEmpty() ? "0" : post.likes));
+        } else {
+            StringBuilder line = new StringBuilder();
+            if (!post.published.isEmpty()) line.append(post.published);
+            // Likes, dislikes and comments, the counts the post's line showed. YouTube no longer
+            // publishes dislikes and Return YouTube Dislike only knows videos, so that one is 0.
+            if (line.length() > 0) line.append(" \u00b7 ");
+            line.append(post.likes.isEmpty() ? "0" : post.likes).append(' ').append(tr("likes"));
+            line.append(" \u00b7 0 ").append(tr("dislikes"));
+            if (!post.comments.isEmpty()) {
+                line.append(" \u00b7 ").append(post.comments).append(' ').append(tr("comments"));
+            }
+            if (line.length() > 0) renderer.setPublishedTime(browseRuns(line.toString()));
         }
-        if (line.length() > 0) renderer.setPublishedTime(browseRuns(line.toString()));
+        if (!post.id.isEmpty()) renderer.addRawField(8, postMenu(post));
         if (!post.image.isEmpty()) {
+            VideoListProto.CommunityPostRenderer.Attachment.Image image =
+                    new VideoListProto.CommunityPostRenderer.Attachment.Image()
+                            .setPicture(browseThumbnails(post.image, 480, 480));
+            // A tap opens the picture at full size, in the app's viewer (it takes the largest
+            // copy of the picture up to 4096 pixels).
+            String full = post.imageFull.isEmpty() ? post.image : post.imageFull;
+            if (!post.imageFull.isEmpty() && !post.imageFull.equals(post.image)) {
+                image.getPicture().addThumb(new VideoListProto.Thumbnails.Thumbnail()
+                        .setUrl(post.imageFull).setWidth(1440).setHeight(1440));
+            }
+            image.setEndpoint(new AndroidFullNextProto.NavigationData().setUrl(full));
+            renderer.setImageViewer(true);
             renderer.setBackstageAttachment(new VideoListProto.CommunityPostRenderer.Attachment()
-                    .addBackstageImage(new VideoListProto.CommunityPostRenderer.Attachment.Image()
-                            .setPicture(browseThumbnails(post.image, 480, 480))));
+                    .addBackstageImage(image));
         }
         return new VideoListProto.CommunityPostThreadRenderer().setPost(
                 new VideoListProto.CommunityPostThreadRenderer.PostWrapper().setPost(renderer));
+    }
+
+    // A post's row of the comment view (12.45.56): commentRenderer acey field 10 = union acec
+    // {commentActionButtonsRenderer aceb, ext 66744747}: likeButton = 1, replyButton = 2,
+    // dislikeButton = 7, each a button union abxg (buttonRenderer abxa 65153809, toggle afqg
+    // 79971800). The row is drawn only with both toggles. A toggle (afqg): isToggled = 3, icon =
+    // 5, endpoint = 7, toggled icon = 8, toggled endpoint = 10 (run when tapped while toggled).
+    // The endpoints are performCommentActionEndpoint (acdz 65929205, aemq {action = 1}); the app
+    // sends the action to comment/perform_comment_action, which the proxy passes to youtube.com.
+    private static final int PERFORM_COMMENT_ACTION = 65929205;
+    private static final int ICON_COMMENT = 243;
+
+    private static byte[] postActionButtons(ChannelEndpoint.Post post) {
+        boolean liked = "LIKE".equals(post.voteStatus);
+        String base = post.likes.isEmpty() ? "0" : post.likes;
+        return actionButtons(post.voteStatus, post.likeAction, post.unlikeAction, post.dislikeAction,
+                post.undislikeAction, liked ? base : bumpCount(base, 1),
+                liked ? bumpCount(base, -1) : base, post.comments);
+    }
+
+    /**
+     * The action row of the comment view (aceb, see above) for a post or a comment: like and
+     * dislike toggles carrying youtube.com's action tokens, and the reply button with the reply
+     * count. {@code withLike}/{@code withoutLike} are the like counts shown after a tap.
+     */
+    private static byte[] actionButtons(String voteStatus, String likeAction, String unlikeAction,
+                                        String dislikeAction, String undislikeAction,
+                                        String withLike, String withoutLike, String replies) {
+        com.viitube.proxy.proto.ProtoWriter buttons = new com.viitube.proxy.proto.ProtoWriter(); // aceb
+        buttons.writeBytes(1, rawField(79971800, postToggle("LIKE".equals(voteStatus), ICON_LIKE,
+                ICON_LIKE_SELECTED, likeAction, withLike, unlikeAction, withoutLike)));
+        com.viitube.proxy.proto.ProtoWriter reply = new com.viitube.proxy.proto.ProtoWriter();   // abxa
+        if (replies != null && !replies.isEmpty()) reply.writeBytes(5, formattedBytes(replies));
+        reply.writeBytes(8, iconBytes(ICON_COMMENT));
+        buttons.writeBytes(2, rawField(65153809, reply.toByteArray()));
+        buttons.writeBytes(7, rawField(79971800, postToggle("DISLIKE".equals(voteStatus),
+                ICON_DISLIKE, ICON_DISLIKE_SELECTED, dislikeAction, withoutLike,
+                undislikeAction, withoutLike)));
+        return rawField(66744747, buttons.toByteArray());                            // acec
+    }
+
+    /** A plain count moved by {@code delta}; "172K" and the like stay as they are. */
+    private static String bumpCount(String count, int delta) {
+        if (!count.matches("[0-9]{1,9}")) return count;
+        return Long.toString(Math.max(0, Long.parseLong(count) + delta));
+    }
+
+    private static byte[] postToggle(boolean toggled, int icon, int toggledIcon, String action,
+                                     String actionCount, String undo, String undoCount) {
+        com.viitube.proxy.proto.ProtoWriter toggle = new com.viitube.proxy.proto.ProtoWriter();  // afqg
+        if (toggled) toggle.writeBool(3, true);
+        toggle.writeBytes(5, iconBytes(icon));
+        toggle.writeBytes(7, commentAction(action, actionCount));
+        toggle.writeBytes(8, iconBytes(toggledIcon));
+        toggle.writeBytes(10, commentAction(undo.isEmpty() ? action : undo, undoCount));
+        return toggle.toByteArray();
+    }
+
+    /**
+     * performCommentActionEndpoint aemq {action = 1, actions = 2}. The app reads the first of
+     * the actions without checking there is one, so it always carries the count update: acdz
+     * 119065485 (afty {text = 1}), the like count the row shows afterwards.
+     */
+    private static byte[] commentAction(String action, String count) {
+        com.viitube.proxy.proto.ProtoWriter update = new com.viitube.proxy.proto.ProtoWriter();  // afty
+        update.writeBytes(1, formattedBytes(count));
+        com.viitube.proxy.proto.ProtoWriter endpoint = new com.viitube.proxy.proto.ProtoWriter(); // aemq
+        endpoint.writeString(1, action);
+        endpoint.writeBytes(2, rawField(119065485, update.toByteArray()));
+        return rawField(PERFORM_COMMENT_ACTION, endpoint.toByteArray());               // acdz
+    }
+
+    /**
+     * The post's ⋮ menu (commentRenderer field 8, menuRenderer aeal 66439850 -> aeaj {items = 1,
+     * each aeah 66441108 -> menu item aeai {text = 1, icon = 2, endpoint = 3}}): Share, which
+     * hands the post's address to Android's share sheet.
+     */
+    private static byte[] postMenu(ChannelEndpoint.Post post) {
+        String address = "https://www.youtube.com/post/" + post.id;
+        com.viitube.proxy.proto.ProtoWriter share = new com.viitube.proxy.proto.ProtoWriter();   // aeai
+        share.writeBytes(1, formattedBytes(tr("Share")));
+        share.writeBytes(2, iconBytes(ICON_SHARE));
+        AndroidFullNextProto.ButtonEndpoint.ShareIntent intent = new AndroidFullNextProto.ButtonEndpoint.ShareIntent()
+                .setType("text/plain")
+                .setChooserTitle(tr("Share"))
+                .addExtras(new AndroidFullNextProto.ButtonEndpoint.ShareIntent.Extra()
+                        .setKey("android.intent.extra.TEXT").setValue(address));
+        share.writeBytes(3, new AndroidFullNextProto.ButtonEndpoint().setShare(intent).toByteArray());
+        com.viitube.proxy.proto.ProtoWriter menu = new com.viitube.proxy.proto.ProtoWriter();    // aeaj
+        menu.writeBytes(1, rawField(66441108, share.toByteArray()));
+        return rawField(66439850, menu.toByteArray());                                 // aeal
+    }
+
+    /** The addToPlaylistEndpoint of a NavigationEndpoint (acdz 69487224, abpa {videoId = 1}). */
+    private static final int ADD_TO_PLAYLIST_ENDPOINT = 69487224;
+
+    /**
+     * A video's menu (menuRenderer aeal 66439850 -> aeaj {items = 1, each aeah 66441108 ->
+     * aeai {text = 1, icon = 2, endpoint = 3}}): Save to playlist (the app's own dialog, which
+     * lists the account's playlists) when signed in, and Share.
+     */
+    private static byte[] videoMenu(String videoId, String title) {
+        com.viitube.proxy.proto.ProtoWriter menu = new com.viitube.proxy.proto.ProtoWriter();    // aeaj
+        if (YouTubeAuth.signedIn()) {
+            com.viitube.proxy.proto.ProtoWriter save = new com.viitube.proxy.proto.ProtoWriter(); // aeai
+            save.writeBytes(1, formattedBytes(tr("Save to playlist")));
+            save.writeBytes(2, iconBytes(ICON_ADDTO));
+            save.writeBytes(3, rawField(ADD_TO_PLAYLIST_ENDPOINT, stringField(1, videoId)));
+            menu.writeBytes(1, rawField(66441108, save.toByteArray()));
+        }
+        com.viitube.proxy.proto.ProtoWriter share = new com.viitube.proxy.proto.ProtoWriter();   // aeai
+        share.writeBytes(1, formattedBytes(tr("Share")));
+        share.writeBytes(2, iconBytes(ICON_SHARE));
+        share.writeBytes(3, shareEndpoint(videoId, title).toByteArray());
+        menu.writeBytes(1, rawField(66441108, share.toByteArray()));
+        return rawField(66439850, menu.toByteArray());
+    }
+
+    /** The post's text as runs, the linked ones opening their address. */
+    private static VideoListProto.TextRuns postRuns(List<String[]> pieces) {
+        VideoListProto.TextRuns runs = new VideoListProto.TextRuns();
+        for (String[] piece : pieces) {
+            VideoListProto.TextRuns.TextRun run = new VideoListProto.TextRuns.TextRun().setText(piece[0]);
+            if (piece[1] != null) run.setNavigation(new AndroidFullNextProto.NavigationData().setUrl(piece[1]));
+            runs.addRun(run);
+        }
+        return runs;
+    }
+
+    private static byte[] rawField(int field, byte[] value) {
+        com.viitube.proxy.proto.ProtoWriter writer = new com.viitube.proxy.proto.ProtoWriter();
+        writer.writeBytes(field, value);
+        return writer.toByteArray();
+    }
+
+    /** FormattedString addp with one run. */
+    private static byte[] formattedBytes(String text) {
+        com.viitube.proxy.proto.ProtoWriter run = new com.viitube.proxy.proto.ProtoWriter();
+        run.writeString(1, text);
+        return rawField(1, run.toByteArray());
+    }
+
+    private static byte[] iconBytes(int iconType) {
+        com.viitube.proxy.proto.ProtoWriter icon = new com.viitube.proxy.proto.ProtoWriter();
+        icon.writeInt32(1, iconType);
+        return icon.toByteArray();
     }
 
     /** "1.2M subscribers" from YouTube's label ("1.23M subscribers") or a plain number. */
     static String subscriberText(String subscribers) {
         if (subscribers == null || subscribers.trim().isEmpty()) return "";
         return shortCount(parseCount(subscribers), "subscribers");
+    }
+
+    // The playlist header's buttons (playlistHeaderRenderer aesr of 12.45.56, drawn by gbk).
+    private static final int ICON_PLAYLIST_ADD = 46;
+    private static final int ICON_OFFLINE_DOWNLOAD = 147;
+    private static final int ICON_PLAY = 247;
+    private static final int WATCH_ENDPOINT = 48687757;   // acdz {videoId 1, playlistId 2, index 3}
+    private static final int LIKE_ENDPOINT = 63158558;    // acdz adqn {status 1, target 2}
+
+    /**
+     * The red play button floating over the header's edge (field 50: union aeso {95228729: adjm
+     * {icon = 1, endpoint = 2, accessibility = 4}}, drawn by the app's fab controller dla; its
+     * endpoint a watchEndpoint of the first video in the playlist). Field 47 is the share
+     * button's endpoint, not this. For the signed-in
+     * account the save toggle (field 45: union abxg {toggle afqg 79971800}), whose endpoints
+     * like/removelike the playlist (adqn target adqq {playlistId = 2}). Watch later and Liked
+     * videos are the account's own lists and have no save toggle.
+     */
+    private static void addPlaylistButtons(VideoListProto.Root.HeaderRender.VlHeader vl, String playlistId,
+                                           PlaylistEndpoint.Playlist playlist) {
+        if (!playlist.videos.isEmpty()) {
+            com.viitube.proxy.proto.ProtoWriter watch = new com.viitube.proxy.proto.ProtoWriter();
+            watch.writeString(1, playlist.videos.get(0).id);
+            watch.writeString(2, playlistId);
+            com.viitube.proxy.proto.ProtoWriter play = new com.viitube.proxy.proto.ProtoWriter(); // adjm
+            play.writeBytes(1, iconBytes(ICON_PLAY));
+            play.writeBytes(2, rawField(WATCH_ENDPOINT, watch.toByteArray()));
+            play.writeBytes(4, stringField(1, tr("Play all")));
+            vl.addRawField(50, rawField(95228729, play.toByteArray()));
+        }
+        if (YouTubeAuth.signedIn() && !playlistId.equals("WL") && !playlistId.equals("LL")) {
+            com.viitube.proxy.proto.ProtoWriter toggle = new com.viitube.proxy.proto.ProtoWriter(); // afqg
+            toggle.writeBytes(5, iconBytes(ICON_PLAYLIST_ADD));
+            toggle.writeBytes(7, playlistLike(playlistId, 0));
+            toggle.writeBytes(8, iconBytes(ICON_PLAYLIST_ADD));
+            toggle.writeBytes(10, playlistLike(playlistId, 2));
+            vl.addRawField(45, rawField(79971800, toggle.toByteArray()));
+        }
+    }
+
+    /** likeEndpoint for a playlist: status 0 like, 2 remove the like. */
+    private static byte[] playlistLike(String playlistId, int status) {
+        com.viitube.proxy.proto.ProtoWriter like = new com.viitube.proxy.proto.ProtoWriter();     // adqn
+        if (status != 0) like.writeInt32(1, status);
+        like.writeBytes(2, stringField(2, playlistId));
+        return rawField(LIKE_ENDPOINT, like.toByteArray());
+    }
+
+    private static byte[] stringField(int field, String value) {
+        com.viitube.proxy.proto.ProtoWriter writer = new com.viitube.proxy.proto.ProtoWriter();
+        writer.writeString(field, value);
+        return writer.toByteArray();
     }
 
     /** VL... playlist page. */
@@ -762,6 +1304,7 @@ final class YoutubeiResponses {
                 .setPublic(1)
                 .addNavigationData(browseNavigation(playlistId, null, null))
                 .addInlineProperty(browseRuns(count));
+        addPlaylistButtons(vl, playlistId, playlist);
         VideoListProto.Root.HeaderRender header = new VideoListProto.Root.HeaderRender().addPlaylistHeader(vl);
 
         VideoListProto.PlaylistData data = new VideoListProto.PlaylistData().setId(playlistId);
@@ -781,6 +1324,7 @@ final class YoutubeiResponses {
                                             .setId(video.id).setPlaylistId(playlistId)
                                             // The place in the queue the app asks /next for.
                                             .setIndex(index)));
+            contents.setRawMenu(videoMenu(video.id, video.title));
             data.addVideo(new VideoListProto.PlaylistData.PlaylistVideo().addContent(contents));
         }
         VideoListProto.Root.ResponseBody.SingleColumnBrowseResultsRenderer.Tabs.TabRenderer
@@ -1164,13 +1708,60 @@ final class YoutubeiResponses {
      */
     private static AndroidFullNextProto.Root.Contents.SingleColumnWatchNextResults
             .SingleColumnWatchNextResultsContents.Results.ResultsContents.ItemSectionRenderer.Header
-            commentsHeader() {
+            commentsTitleHeader() {
         return new AndroidFullNextProto.Root.Contents.SingleColumnWatchNextResults
                 .SingleColumnWatchNextResultsContents.Results.ResultsContents.ItemSectionRenderer
                 .Header().addSectionHeader(new AndroidFullNextProto.Root.Contents
                         .SingleColumnWatchNextResults.SingleColumnWatchNextResultsContents.Results
                         .ResultsContents.ItemSectionRenderer.Header.ItemSectionHeaderRenderer()
                                 .setTitle(nextRuns(tr("Comments"))));
+    }
+
+    private static AndroidFullNextProto.Root.Contents.SingleColumnWatchNextResults
+            .SingleColumnWatchNextResultsContents.Results.ResultsContents.ItemSectionRenderer.Header
+            commentsHeader(String videoId, boolean newest) {
+        return new AndroidFullNextProto.Root.Contents.SingleColumnWatchNextResults
+                .SingleColumnWatchNextResultsContents.Results.ResultsContents.ItemSectionRenderer
+                .Header().setRaw(commentsHeaderRenderer(videoId, newest));
+    }
+
+    /**
+     * The comments' header with its sort menu: commentsHeaderRenderer acfr (ext 105977417 of the
+     * section header union) {title = 1, sortMenu = 3 (union acfh {sortFilterSubMenuRenderer
+     * afkc 76818770})}. The menu's items (afkb) carry reloadContinuationData (field 3, union afkd
+     * {60487319: afad {continuation = 1}}): choosing one makes the app ask /next with that token
+     * and replace the comments with the answer (commentsReload).
+     */
+    private static byte[] commentsHeaderRenderer(String videoId, boolean newest) {
+        com.viitube.proxy.proto.ProtoWriter menu = new com.viitube.proxy.proto.ProtoWriter();   // afkc
+        String[] labels = {tr("Top comments"), tr("Newest first")};
+        for (int i = 0; i < 2; i++) {
+            com.viitube.proxy.proto.ProtoWriter reload = new com.viitube.proxy.proto.ProtoWriter(); // afad
+            reload.writeString(1, YoutubeiEndpoint.commentsSortToken(videoId, i == 1));
+            com.viitube.proxy.proto.ProtoWriter item = new com.viitube.proxy.proto.ProtoWriter();   // afkb
+            item.writeString(1, labels[i]);
+            if ((i == 1) == newest) item.writeBool(2, true);
+            item.writeBytes(3, rawField(60487319, reload.toByteArray()));
+            menu.writeBytes(1, item.toByteArray());
+        }
+        menu.writeString(2, tr("Sort by"));
+        com.viitube.proxy.proto.ProtoWriter header = new com.viitube.proxy.proto.ProtoWriter();     // acfr
+        header.writeBytes(1, formattedBytes(tr("Comments")));
+        // The heading the app draws: title = 10, the count beside it = 11.
+        header.writeBytes(10, formattedBytes(tr("Comments")));
+        String count = InnertubeEndpoint.commentsCount(videoId);
+        if (!count.isEmpty()) header.writeBytes(11, formattedBytes(count));
+        if (YouTubeAuth.signedIn()) {
+            // "Add a public comment..." with the account's picture: createRenderer = 2 (union
+            // aceq {commentSimpleboxRenderer acfi 93764576 {picture = 3, placeholder = 4}}).
+            String photo = YouTubeAuth.accountPhoto();
+            com.viitube.proxy.proto.ProtoWriter box = new com.viitube.proxy.proto.ProtoWriter();  // acfi
+            box.writeBytes(3, browseThumbnails(avatarOrDefault(photo), 88, 88).toByteArray());
+            box.writeBytes(4, formattedBytes(tr("Add a public comment...")));
+            header.writeBytes(2, rawField(93764576, box.toByteArray()));
+        }
+        header.writeBytes(3, rawField(76818770, menu.toByteArray()));
+        return rawField(105977417, header.toByteArray());
     }
 
     private static AndroidFullNextProto.ShelfRenderer relatedShelf(
@@ -1263,19 +1854,25 @@ final class YoutubeiResponses {
         // related videos then ends after one page - the token of the list goes to the comments
         // instead - so scrolling to the bottom of the watch page arrives at the comments and
         // goes on through them.
+        boolean sortable = clientMajorVersion >= PIVOT_BAR_VERSION;
         if (!comments.isEmpty() || (commentsToken != null && !commentsToken.isEmpty())) {
             AndroidFullNextProto.Root.Contents.SingleColumnWatchNextResults
                     .SingleColumnWatchNextResultsContents.Results.ResultsContents.ItemSectionRenderer
-                    commentSection = nextSection().setSectionHeader(commentsHeader());
+                    commentSection = nextSection().setSectionHeader(sortable
+                            ? commentsHeader(video.id, false) : commentsTitleHeader());
             for (InnertubeEndpoint.Comment comment : comments) {
                 commentSection.addContent(nextSectionContents().addCommentThread(commentThread(comment, now)));
+            }
+            if (sortable && commentsToken != null && !commentsToken.isEmpty()) {
+                commentSection.addCommentRequest(commentRequest(commentsToken));
             }
             results.addContent(listEntry().addItemSectionRender(commentSection));
         }
         // One token for the whole list: the comments when they are switched on - whether the
-        // first ones made it into this answer or not - and more related videos otherwise.
+        // first ones made it into this answer or not - and more related videos otherwise. From
+        // 12 on the comments carry their own token (in their section, for the sort menu).
         String listToken = commentsToken == null || commentsToken.isEmpty()
-                ? relatedToken : commentsToken;
+                ? relatedToken : sortable ? "" : commentsToken;
         if (listToken != null && !listToken.isEmpty()) {
             results.addContinuation(nextContinuations(listToken));
         }
@@ -1370,8 +1967,36 @@ final class YoutubeiResponses {
         return section;
     }
 
-    /** One comment, as the apps of 2015-2017 draw it. */
+    /** One comment, as the apps of 2015-2017 draw it, with a "View N replies" line under it. */
     private static AndroidFullNextProto.CommentThreadRenderer commentThread(
+            InnertubeEndpoint.Comment comment, long now) {
+        AndroidFullNextProto.CommentThreadRenderer thread = new AndroidFullNextProto.CommentThreadRenderer()
+                .setComment(new AndroidFullNextProto.CommentThreadRenderer.CommentWrapper()
+                        .setComment(commentRenderer(comment, now)));
+        long replies = parseCount(comment.replyCount);
+        if (replies > 0) {
+            // commentRepliesRenderer acez (thread field 2, union acfd 65060753): its button
+            // (field 8, a buttonRenderer abxa {text = 5}) is the "View N replies" line the thread
+            // view (rbg -> rba) draws under the comment. It opens nothing yet: the app's replies
+            // panel (showEngagementPanel) is not served.
+            com.viitube.proxy.proto.ProtoWriter button = new com.viitube.proxy.proto.ProtoWriter(); // abxa
+            button.writeBytes(5, formattedBytes(viewReplies(comment.replyCount, replies)));
+            com.viitube.proxy.proto.ProtoWriter renderer = new com.viitube.proxy.proto.ProtoWriter(); // acez
+            renderer.writeBytes(8, rawField(65153809, button.toByteArray()));
+            thread.setRawReplies(rawField(65060753, renderer.toByteArray()));
+        }
+        return thread;
+    }
+
+    /** "View 66 replies", "View reply"; YouTube's own count text is kept ("1.2K"). */
+    private static String viewReplies(String countText, long count) {
+        if (isPolish()) {
+            return count == 1 ? "Wyświetl odpowiedź" : "Wyświetl " + countText + " odpowiedzi";
+        }
+        return count == 1 ? "View reply" : "View " + countText + " replies";
+    }
+
+    private static AndroidFullNextProto.CommentRenderer commentRenderer(
             InnertubeEndpoint.Comment comment, long now) {
         AndroidFullNextProto.CommentRenderer renderer = new AndroidFullNextProto.CommentRenderer()
                 .setCommentId(comment.id)
@@ -1385,8 +2010,17 @@ final class YoutubeiResponses {
         // is why the time used to be missing). Keep the time there; the counts go on the buttons.
         String age = relativeTime(comment.published, now);
         if (!age.isEmpty()) renderer.setSecondary(nextRuns(age));
-        return new AndroidFullNextProto.CommentThreadRenderer().setComment(
-                new AndroidFullNextProto.CommentThreadRenderer.CommentWrapper().setComment(renderer));
+        if (!comment.likeAction.isEmpty() && !comment.dislikeAction.isEmpty()) {
+            // Like / dislike / reply row with the counts (commentRenderer fields 10 and 28).
+            boolean liked = "LIKE".equals(comment.voteStatus);
+            String without = comment.likeCount.isEmpty() ? "0" : comment.likeCount;
+            String with = comment.likeCountLiked.isEmpty() ? bumpCount(without, 1) : comment.likeCountLiked;
+            renderer.addRawField(10, actionButtons(comment.voteStatus, comment.likeAction,
+                    comment.unlikeAction, comment.dislikeAction, comment.undislikeAction, with,
+                    without, comment.replyCount));
+            renderer.addRawField(28, formattedBytes(liked ? with : without));
+        }
+        return renderer;
     }
 
     /**
@@ -1414,6 +2048,29 @@ final class YoutubeiResponses {
         return new AndroidFullNextProto.Root().setContinuation(
                 new AndroidFullNextProto.Root.ContinuationContents()
                         .addSectionListContinuation(results)).toByteArray();
+    }
+
+    /**
+     * A page of the comments' own section (apps from 12 on): itemSectionContinuation (Root
+     * continuationContents 50195462, itemSectionRenderer adpe {contents = 1, continuations = 2,
+     * header = 5}). With {@code reloadVideoId} it is the first page of a sort choice, which
+     * replaces the section and carries the menu showing that choice.
+     */
+    static byte[] commentsSection(List<InnertubeEndpoint.Comment> comments, long now,
+                                  String continuationToken, String reloadVideoId, boolean newest) {
+        AndroidFullNextProto.Root.Contents.SingleColumnWatchNextResults
+                .SingleColumnWatchNextResultsContents.Results.ResultsContents.ItemSectionRenderer section =
+                nextSection();
+        if (reloadVideoId != null) section.setSectionHeader(commentsHeader(reloadVideoId, newest));
+        for (InnertubeEndpoint.Comment comment : comments) {
+            section.addContent(nextSectionContents().addCommentThread(commentThread(comment, now)));
+        }
+        if (continuationToken != null && !continuationToken.isEmpty()) {
+            section.addCommentRequest(commentRequest(continuationToken));
+        }
+        return new AndroidFullNextProto.Root().setContinuation(
+                new AndroidFullNextProto.Root.ContinuationContents()
+                        .addItemSectionContinuation(section)).toByteArray();
     }
 
     /** The token the app sends back to ask for the comments of a video. */
@@ -1444,7 +2101,7 @@ final class YoutubeiResponses {
         AndroidFullNextProto.AuthorRendererData.SubscribeButtonData.SubContents subscribe =
                 new AndroidFullNextProto.AuthorRendererData.SubscribeButtonData.SubContents()
                         .setChannelId(channelId)
-                        .setInt3(0).setInt4(1).setInt6(0).setInt8(0)
+                        .setInt3(AccountActions.isSubscribed(channelId) ? 1 : 0).setInt4(1).setInt6(0).setInt8(0)
                         .setSubscribeButton(nextRunsBold("SUBSCRIBE"))
                         .setSubscribedLabel(nextRunsBold("SUBSCRIBED"))
                         .setSubscribeLabel(nextRunsBold("SUBSCRIBE"))
@@ -1484,6 +2141,32 @@ final class YoutubeiResponses {
                                 .setKey("android.intent.extra.SUBJECT")
                                 .setValue(title));
         return new AndroidFullNextProto.ButtonEndpoint().setShare(share);
+    }
+
+    /**
+     * The like or the dislike button: a toggle whose taps send likeEndpoints (like/like or
+     * like/dislike, then like/removelike), which the proxy carries out on the signed-in account.
+     * Toggled, it shows the count one higher.
+     */
+    private static AndroidFullNextProto.SlimMetadataButton likeButton(String videoId, boolean like,
+                                                                     long count, String label,
+                                                                     boolean rated) {
+        // Already rated: the count includes the account's own vote, so "off" is one lower.
+        long off = rated ? Math.max(0, count - 1) : count;
+        AndroidFullNextProto.ToggleButtonRenderer toggle = new AndroidFullNextProto.ToggleButtonRenderer()
+                .setIsToggled(rated ? 1 : 0)
+                .setDefaultIcon(new AndroidFullNextProto.IconContainer()
+                        .setIconType(like ? ICON_LIKE : ICON_DISLIKE))
+                // LIKE_SELECTED / DISLIKE_SELECTED: the blue thumbs (IconType 301/302, gsu).
+                .setToggledIcon(new AndroidFullNextProto.IconContainer()
+                        .setIconType(like ? ICON_LIKE_SELECTED : ICON_DISLIKE_SELECTED))
+                .setDefaultText(nextRuns(off > 0 ? shortNumber(off) : label))
+                .setToggledText(nextRuns(shortNumber(off + 1)))
+                .setDefaultServiceEndpoint(new LikeProto.Endpoint(
+                        like ? LikeProto.LIKE : LikeProto.DISLIKE, videoId))
+                .setToggledServiceEndpoint(new LikeProto.Endpoint(LikeProto.INDIFFERENT, videoId));
+        return new AndroidFullNextProto.SlimMetadataButton()
+                .setToggleButton(new LikeProto.SlimToggleButton(videoId, like, toggle));
     }
 
     /** One of the buttons under the video of the 2017 apps' watch page. */
@@ -1535,13 +2218,14 @@ final class YoutubeiResponses {
                         .setVideoId(video.id);
         if (!video.description.isEmpty()) slim.setDescription(linkedRuns(video.description));
         long dislikes = parseCount(video.dislikes);
-        slim.addButtons(slimButton(ICON_LIKE, likes > 0 ? shortNumber(likes) : tr("Like")));
-        slim.addButtons(slimButton(ICON_DISLIKE, dislikes > 0 ? shortNumber(dislikes) : tr("Dislike")));
+        slim.addButtons(likeButton(video.id, true, likes, tr("Like"), "LIKE".equals(page.likeStatus)));
+        slim.addButtons(likeButton(video.id, false, dislikes, tr("Dislike"), "DISLIKE".equals(page.likeStatus)));
         slim.addButtons(slimButton(ICON_SHARE, tr("Share"), shareEndpoint(video.id, video.title)));
         if (clientMajorVersion >= DOWNLOAD_BUTTON_VERSION) {
             slim.addButtons(slimButton(ICON_DOWNLOAD, tr("Download")));
         }
-        slim.addButtons(slimButton(ICON_ADDTO, "Save"));
+        slim.addButtons(slimButton(ICON_ADDTO, "Save",
+                new AndroidFullNextProto.ButtonEndpoint().setAddToPlaylist(video.id)));
 
         AndroidFullNextProto.SlimOwner.SlimOwnerRenderer owner =
                 new AndroidFullNextProto.SlimOwner.SlimOwnerRenderer()
@@ -1691,8 +2375,11 @@ final class YoutubeiResponses {
             itag = 17;
             quality = "tiny";
         }
+        // The H.264 level has to allow the size: the app drops a format its decoder cannot take,
+        // and level 3.1 (64001F) stops at 720p - 1080p is level 4.0 (640028), as YouTube's own.
+        String level = height > 720 ? "640028" : "64001F";
         return new StreamFormat(itag, url, height * 16 / 9, height, quality, height + "p",
-                "video/mp4; codecs=\"avc1.64001F, mp4a.40.2\"");
+                "video/mp4; codecs=\"avc1." + level + ", mp4a.40.2\"");
     }
 
     static byte[] player(PlayerInfo info) {

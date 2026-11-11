@@ -88,6 +88,11 @@ public class ProxyServer extends NanoHTTPD {
         register("/art/**", new GpmEndpoint());
         register("/youtube/accounts/registerDevice", new RegisterDeviceEndpoint());
         register("/proxy/ytbt", new RegisterDeviceEndpoint());
+        register("/proxy/token", new ProxyLoginEndpoint());
+        register("/proxy/account", new ProxyLoginEndpoint());
+        register("/proxy/signedin", new ProxyLoginEndpoint());
+        register("/proxy/raw", new RawEndpoint());
+        register("/proxy/icon/*", new IconEndpoint());
         register("/feeds/api/standardfeeds/*/most_popular", new MostPopularEndpoint());
         register("/feeds/api/standardfeeds/*/most_popular/*", new MostPopularEndpoint());
         register("/feeds/api/standardfeeds/*/*", new MostPopularEndpoint());
@@ -130,6 +135,7 @@ public class ProxyServer extends NanoHTTPD {
         register("/youtubei/v1/guide", new YoutubeiEndpoint("guide"));
         register("/youtubei/v1/navigation/resolve_url", new YoutubeiEndpoint("resolve_url"));
         register("/youtubei/v1/config", new YoutubeiEndpoint("config"));
+        register("/youtubei/v1/account/accounts_list", new YoutubeiEndpoint("accounts_list"));
         register("/deviceregistration/v1/devices", new YoutubeiEndpoint("deviceregistration"));
         register("/c2dm/register3", new YoutubeiEndpoint("c2dm"));
         register("/device_204", new YoutubeiEndpoint("device_204"));

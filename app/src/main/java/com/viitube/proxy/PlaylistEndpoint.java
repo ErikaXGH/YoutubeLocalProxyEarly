@@ -257,10 +257,10 @@ public class PlaylistEndpoint implements Endpoint {
     private static int findVideoCount(Object node) {
         if (node instanceof JSONObject) {
             JSONObject object = (JSONObject) node;
-            JSONArray names = object.names();
+            java.util.Iterator<String> names = object.keys();
             if (names == null) return -1;
-            for (int i = 0; i < names.length(); i++) {
-                String key = names.optString(i);
+            for (int i = 0; names.hasNext(); i++) {
+                String key = names.next();
                 // Skip the video list itself; the count lives in the header/sidebar.
                 if ("playlistVideoListRenderer".equals(key) || "playlistVideoRenderer".equals(key)) continue;
                 Object value = object.opt(key);
@@ -317,9 +317,9 @@ public class PlaylistEndpoint implements Endpoint {
                 token = findString(viewModel.opt("continuationCommand"), "token");
                 if (!token.isEmpty()) return token;
             }
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length(); i++) {
-                String token = findContinuation(object.opt(names.optString(i)));
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) for (int i = 0; names.hasNext(); i++) {
+                String token = findContinuation(object.opt(names.next()));
                 if (!token.isEmpty()) return token;
             }
         } else if (node instanceof JSONArray) {
@@ -370,9 +370,9 @@ public class PlaylistEndpoint implements Endpoint {
                     && "LOCKUP_CONTENT_TYPE_VIDEO".equals(lockup.optString("contentType", ""))) {
                 addVideo(videos, object, lockup.optString("contentId", ""));
             }
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length() && videos.size() < limit; i++) {
-                String key = names.optString(i);
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) for (int i = 0; names.hasNext() && videos.size() < limit; i++) {
+                String key = names.next();
                 if ("playlistVideoRenderer".equals(key) || "lockupViewModel".equals(key)) continue;
                 collectPlaylistVideos(object.opt(key), videos, limit);
             }
@@ -403,9 +403,9 @@ public class PlaylistEndpoint implements Endpoint {
             JSONObject object = (JSONObject) node;
             JSONObject found = object.optJSONObject(key);
             if (found != null) return found;
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length(); i++) {
-                found = findObject(object.opt(names.optString(i)), key);
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) for (int i = 0; names.hasNext(); i++) {
+                found = findObject(object.opt(names.next()), key);
                 if (found != null) return found;
             }
         } else if (node instanceof JSONArray) {
@@ -423,9 +423,9 @@ public class PlaylistEndpoint implements Endpoint {
             JSONObject object = (JSONObject) node;
             Object value = object.opt(key);
             if (value instanceof String && !((String) value).isEmpty()) return (String) value;
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length(); i++) {
-                String found = findString(object.opt(names.optString(i)), key);
+            java.util.Iterator<String> names = object.keys();
+            if (names != null) for (int i = 0; names.hasNext(); i++) {
+                String found = findString(object.opt(names.next()), key);
                 if (!found.isEmpty()) return found;
             }
         } else if (node instanceof JSONArray) {

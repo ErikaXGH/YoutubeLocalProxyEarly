@@ -164,9 +164,9 @@ final class MusicSearch {
                 out.add(item);
                 return;
             }
-            JSONArray names = object.names();
+            java.util.Iterator<String> names = object.keys();
             if (names != null) {
-                for (int i = 0; i < names.length(); i++) collectByKey(object.opt(names.optString(i)), key, out);
+                for (int i = 0; names.hasNext(); i++) collectByKey(object.opt(names.next()), key, out);
             }
         } else if (node instanceof JSONArray) {
             JSONArray array = (JSONArray) node;
@@ -221,10 +221,10 @@ final class MusicSearch {
                 out.add(item);
                 return;
             }
-            JSONArray names = object.names();
+            java.util.Iterator<String> names = object.keys();
             if (names != null) {
-                for (int i = 0; i < names.length(); i++) {
-                    collectListItems(object.opt(names.optString(i)), out);
+                for (int i = 0; names.hasNext(); i++) {
+                    collectListItems(object.opt(names.next()), out);
                 }
             }
         } else if (node instanceof JSONArray) {
@@ -334,10 +334,10 @@ final class MusicSearch {
                 String value = object.optString(key, "");
                 if (!value.isEmpty()) return value;
             }
-            JSONArray names = object.names();
+            java.util.Iterator<String> names = object.keys();
             if (names != null) {
-                for (int i = 0; i < names.length(); i++) {
-                    String found = findFirst(object.opt(names.optString(i)), key);
+                for (int i = 0; names.hasNext(); i++) {
+                    String found = findFirst(object.opt(names.next()), key);
                     if (!found.isEmpty()) return found;
                 }
             }

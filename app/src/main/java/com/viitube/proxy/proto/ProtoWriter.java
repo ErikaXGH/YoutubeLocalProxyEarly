@@ -53,12 +53,11 @@ public final class ProtoWriter {
         return size;
     }
 
+    /** Looked up once: getBytes("UTF-8") looks the charset up by name for every string. */
+    private static final java.nio.charset.Charset UTF_8 = java.nio.charset.Charset.forName("UTF-8");
+
     private static byte[] utf8(String value) {
-        try {
-            return value.getBytes("UTF-8");
-        } catch (java.io.UnsupportedEncodingException e) {
-            throw new IllegalStateException(e);
-        }
+        return value.getBytes(UTF_8);
     }
 
     public void writeString(int field, String value) {
@@ -68,6 +67,13 @@ public final class ProtoWriter {
     public void writeBytes(int field, byte[] value) {
         tag(field, 2);
         rawVarint(value.length);
+        ensure(value.length);
+        System.arraycopy(value, 0, buffer, length, value.length);
+        length += value.length;
+    }
+
+    /** Bytes that are already encoded fields, appended as they are. */
+    public void writeRawBytes(byte[] value) {
         ensure(value.length);
         System.arraycopy(value, 0, buffer, length, value.length);
         length += value.length;

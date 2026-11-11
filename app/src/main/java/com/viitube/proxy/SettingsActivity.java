@@ -40,6 +40,7 @@ public class SettingsActivity extends Activity {
     private static final int MODE_AUDIO = 103;
     private static final int MODE_MUX720 = 104;
     private static final int MODE_SELECT = 105;
+    private static final int MODE_MUX1080 = 106;
 
     /** Ids of the audio-quality radio buttons. */
     private static final int AUDIO_HIGH = 201;
@@ -198,6 +199,7 @@ public class SettingsActivity extends Activity {
     private float density;
     private String category;
     private EditText apiKey;
+    private Button account;
     private EditText invidious;
     private EditText invidiousList;
     private RadioGroup playbackModes;
@@ -322,6 +324,8 @@ public class SettingsActivity extends Activity {
         playbackModes.addView(radio(MODE_1080P, "1080p video only (no audio)"));
         playbackModes.addView(radio(MODE_AUDIO, "Audio only (highest available quality)"));
         playbackModes.addView(radio(MODE_MUX720, "720p video with audio (muxed on this phone)"));
+        playbackModes.addView(radio(MODE_MUX1080,
+                "1080p video with audio when the video has it (muxed on this phone)"));
         RadioButton select = radio(MODE_SELECT, "Select in app (every quality there is)");
         playbackModes.addView(select);
         option(screen, "Playback format", playbackModes,
@@ -440,6 +444,52 @@ public class SettingsActivity extends Activity {
                 "Optional. With a key of your own the popular feeds come from the Data API, and "
                         + "upload descriptions and exact view counts are filled in. Without one "
                         + "everything is read from the same pages the apps would read.");
+
+        YouTubeAuth.init(this);
+        account = new Button(this);
+        account.setOnClickListener(new AccountButton(this));
+        option(screen, "YouTube account", account,
+                "Sign in with Google's own page, inside this app; the proxy then keeps the "
+                        + "session cookies youtube.com sets (on this phone only, never in the "
+                        + "config or a crash report) and signs the requests it makes, so the home "
+                        + "feed is your recommendations and Subscriptions shows your channels. "
+                        + "Your password never passes through the proxy.");
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        refreshAccount();
+    }
+
+    void refreshAccount() {
+        if (account != null) {
+            account.setText(YouTubeAuth.signedIn()
+                    ? "Sign out" + (YouTubeAuth.accountName().isEmpty() ? "" : " (" + YouTubeAuth.accountName() + ")")
+                    : "Sign in to YouTube");
+        }
+    }
+
+    /** Signs in (opens Google's page) or signs out, depending on the session. */
+    private static final class AccountButton implements View.OnClickListener {
+        private final SettingsActivity screen;
+
+        AccountButton(SettingsActivity screen) {
+            this.screen = screen;
+        }
+
+        @Override
+        public void onClick(View view) {
+            if (YouTubeAuth.signedIn()) {
+                YouTubeAuth.signOut();
+                android.webkit.CookieSyncManager.createInstance(screen);
+                android.webkit.CookieManager.getInstance().removeAllCookie();
+                screen.refreshAccount();
+                Toast.makeText(screen, "Signed out of YouTube", Toast.LENGTH_SHORT).show();
+            } else {
+                screen.startActivity(new Intent(screen, LoginActivity.class));
+            }
+        }
     }
 
     private void storage(LinearLayout screen) {
@@ -501,6 +551,7 @@ public class SettingsActivity extends Activity {
             case MODE_1080P: return "video1080";
             case MODE_AUDIO: return "audio";
             case MODE_MUX720: return "mux720";
+            case MODE_MUX1080: return "mux1080";
             case MODE_SELECT: return "select";
             default: return "360p";
         }
@@ -510,6 +561,7 @@ public class SettingsActivity extends Activity {
         if ("video1080".equals(mode)) return MODE_1080P;
         if ("audio".equals(mode)) return MODE_AUDIO;
         if ("mux720".equals(mode)) return MODE_MUX720;
+        if ("mux1080".equals(mode)) return MODE_MUX1080;
         if ("select".equals(mode)) return MODE_SELECT;
         return MODE_360P;
     }

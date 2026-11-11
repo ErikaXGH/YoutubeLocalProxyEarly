@@ -24,14 +24,32 @@ message watchNavigation {
  * videos it is drawn as the Autoplay switch; the app keeps that state itself (its autonav
  * setting), so only the label has to be sent.
  */
+/**
+ * Like/dislike/remove-like (likeEndpoint, acdz field 63158558, class adqn of YouTube 12.45.56).
+ * The app sends status 0 as like/like, 1 as like/dislike and 2 as like/removelike, with the
+ * target's video id; the proxy then does the same on the signed-in account.
+ */
+message likeTarget {
+    string videoId = 1;
+}
+message likeEndpoint {
+    optional int32 status = 1;
+    optional likeTarget target = 2;
+}
+message likeServiceEndpoint {
+    optional likeEndpoint like = 63158558;
+}
 message toggleButtonRenderer {
     optional int32 isToggled = 3;
     optional int32 isDisabled = 4;
     optional iconContainer defaultIcon = 5;
     optional textRuns defaultText = 6;
+    /** Sent when the button is tapped while off, and while on (the like buttons). */
+    optional likeServiceEndpoint defaultServiceEndpoint = 7;
     optional iconContainer toggledIcon = 8;
     /** What the switch is called; the app reads this one for both states. */
     optional textRuns toggledText = 9;
+    optional likeServiceEndpoint toggledServiceEndpoint = 10;
 }
 /**
  * A shelf (shelfRenderer, 51845067): a list with "Up next" above it and the Autoplay switch on
@@ -238,6 +256,20 @@ message slimMetadataButton {
         optional buttonContainer button = 22;
     }
     repeated slimMetadataButtonRenderer button = 124608017;
+    /**
+     * The like and the dislike button (slimMetadataToggleButtonRenderer, class afjq): a toggle
+     * button whose endpoints are likeEndpoints, the video it is about, and which of the two it is.
+     */
+    message slimMetadataToggleButtonRenderer {
+        optional likeTarget target = 17;
+        optional int32 isLike = 20;
+        optional int32 isDislike = 21;
+        message buttonContainer {
+            optional toggleButtonRenderer toggle = 79971800;
+        }
+        optional buttonContainer button = 26;
+    }
+    repeated slimMetadataToggleButtonRenderer toggleButton = 124608045;
 }
 message slimOwner {
     message slimOwnerRenderer {

@@ -64,11 +64,15 @@ public class HttpClient {
                 }
             }
             conn.setDoOutput(true);
+            byte[] body = jsonBody.getBytes("UTF-8");
+            // Streamed with its length: otherwise the connection copies the body into a buffer
+            // of its own before sending it.
+            conn.setFixedLengthStreamingMode(body.length);
             conn.setConnectTimeout(connectTimeout);
             conn.setReadTimeout(readTimeout);
             OutputStream os = conn.getOutputStream();
             try {
-                os.write(jsonBody.getBytes("UTF-8"));
+                os.write(body);
             } finally {
                 os.close();
             }
